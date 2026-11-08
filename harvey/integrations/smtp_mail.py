@@ -63,6 +63,9 @@ class SmtpImapProvider(MailProvider):
         msg["To"] = to_email
         msg["From"] = f"{persona.name} <{persona.email or self.smtp_user}>"
         msg["Subject"] = subject
+        reply_to = getattr(self.config.channels.email, "reply_to", "")
+        if reply_to:
+            msg["Reply-To"] = reply_to
         message_id = make_msgid(domain=(persona.email or self.smtp_user).split("@")[-1])
         msg["Message-ID"] = message_id
         if in_reply_to:
@@ -87,6 +90,8 @@ class SmtpImapProvider(MailProvider):
         return SendResult(ok=True, message_id=message_id, thread_ref=message_id)
 
     async def get_replies(self, limit: int = 50) -> list[InboundMessage]:
+        if getattr(self.config.channels.email, "smtp_send_only", False):
+            return []  # Replies are handled manually in the Reply-To mailbox.
         loop = asyncio.get_event_loop()
         try:
             return await loop.run_in_executor(None, self._fetch_unseen, limit)
@@ -168,6 +173,8 @@ class SmtpImapProvider(MailProvider):
             await smtp.quit()
         except Exception as e:
             return False, f"SMTP login failed: {str(e)[:200]}"
+        if getattr(self.config.channels.email, "smtp_send_only", False):
+            return True, "SMTP connected (send-only; replies must be handled manually)"
         # IMAP handshake
         loop = asyncio.get_event_loop()
 
