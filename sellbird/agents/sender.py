@@ -687,6 +687,9 @@ class Sender:
             cumulative_days = 0
             new_rows = 0
             for step in campaign.sequence:
+                if (getattr(self.config.channels.email, "smtp_send_only", False)
+                        and step.step != 1):
+                    continue
                 cumulative_days += max(0, step.delay_days)
                 send_at = now + timedelta(days=cumulative_days)
                 if window is not None:
@@ -807,6 +810,11 @@ class Sender:
     async def _blocked(self, item: dict, prospect, allow_risky: bool) -> tuple[str, str] | None:
         """Why this email must not go out, as (status, error), or None."""
         await sync_sending_mode(self.config, self.state)   # "Turn off autopilot" counts at once
+        if getattr(self.config.channels.email, "smtp_send_only", False):
+            if not self.config.channels.email.require_approval:
+                return "cancelled", "send-only SMTP requires human approval"
+            if item["kind"] != "sequence" or int(item["step"]) != 1:
+                return "cancelled", "send-only SMTP: handle replies and follow-ups manually"
         if prospect is None:
             return "failed", "prospect missing"
         # A suppressed address or domain is never emailed, whatever the kind.

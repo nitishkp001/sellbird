@@ -243,8 +243,8 @@
   <div class="section-head">
     <div><h2>Contacts</h2><p>People Sellbird has found, how sure it is of their address, and where each one stands.</p></div>
     <div class="page-actions">
-      <button class="btn btn-secondary btn-sm" onclick="downloadCsv('/api/export/prospects.csv', 'prospects.csv', this)"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Export deliverable</button>
-      <button class="btn btn-ghost btn-sm" onclick="downloadCsv('/api/export/prospects.csv?all=true', 'prospects-all.csv', this)">Export all</button>
+      <button class="btn btn-primary btn-sm" onclick="downloadCsv('/api/export/prospects.csv?all=true', 'leads-all.csv', this)"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Export all leads (CSV)</button>
+      <button class="btn btn-ghost btn-sm" onclick="downloadCsv('/api/export/prospects.csv', 'prospects-verified.csv', this)">Export verified only</button>
     </div>
   </div>
   <div id="prospects-table"></div>

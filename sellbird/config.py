@@ -254,6 +254,25 @@ class EmailChannelConfig(BaseModel):
     # "microsoft" (Microsoft 365 / Outlook via Graph), or "smtp" (any
     # SMTP+IMAP mailbox: AgentMail, Fastmail, ...)
     provider: str = "instantly"
+    # SMTP relays can send while a person handles replies in another mailbox.
+    smtp_send_only: bool = False
+    reply_to: str = ""
+
+    @field_validator("reply_to")
+    @classmethod
+    def _reply_address(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.fullmatch(r"[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+", value):
+            raise ValueError("reply_to must be a single email address")
+        return value
+
+    @model_validator(mode="after")
+    def _send_only_requirements(self):
+        if self.smtp_send_only:
+            if self.provider != "smtp" or not self.reply_to or not self.require_approval:
+                raise ValueError("smtp_send_only requires provider smtp, reply_to, and require_approval true")
+        return self
+
     max_daily_sends: int = 50
     # Each extra sending inbox's daily cold-email cap (sellbird inboxes),
     # under the warmup ramp from the day that inbox started warming. The
@@ -630,7 +649,7 @@ class UsageConfig(BaseModel):
         return v
 
 
-BRAIN_PROVIDERS = ("claude", "codex")
+BRAIN_PROVIDERS = ("claude", "codex", "antigravity")
 CODEX_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 # Model names are passed to a CLI, so they must look like a model name and
@@ -642,8 +661,9 @@ class BrainConfig(BaseModel):
     """Which subscription Sellbird thinks with.
 
     ``claude`` (default) runs Claude Code headless on your Claude plan.
-    ``codex`` runs Codex on your ChatGPT plan. There is never an automatic
-    fallback between them, and an explicit ``model`` only affects Sellbird —
+    ``codex`` runs Codex on your ChatGPT plan.
+    ``antigravity`` runs the local Antigravity CLI (agy) on your Gemini plan.
+    There is never an automatic fallback between them, and an explicit ``model`` only affects Sellbird —
     your own Claude Code / Codex settings are never read or changed.
     """
 

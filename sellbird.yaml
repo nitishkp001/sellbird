@@ -5,48 +5,45 @@ persona:
   email: "alex@yourcompany.com"
   linkedin: "linkedin.com/in/alex-yourcompany"
   tone: "professional, consultative, confident"
-
 product:
-  name: "Your Product"
-  description: "Describe what your product does and who it's for"
-  pricing: "Starting at $X/mo"
+  name: Your Product
+  description: Describe what your product does and who it's for
+  pricing: Starting at $X/mo
   key_benefits:
-    - "Benefit 1"
-    - "Benefit 2"
-    - "Benefit 3"
+  - Benefit 1
+  - Benefit 2
+  - Benefit 3
   objection_responses:
-    "too expensive": "I understand budget is important. Most of our clients see ROI within 30 days..."
-    "already have a solution": "That makes sense. Curious — what's the one thing you wish it did better?"
-    "not interested": "No worries at all. Mind if I ask what your current approach looks like?"
+    too expensive: I understand budget is important. Most of our clients see ROI within
+      30 days...
+    already have a solution: "That makes sense. Curious \u2014 what's the one thing\
+      \ you wish it did better?"
+    not interested: No worries at all. Mind if I ask what your current approach looks
+      like?
   offer:
-    primary: ""                    # Main offer (e.g., "Monthly subscription starting at $99/mo")
-    entry: ""                      # Low-commitment entry (e.g., "14-day free trial", "Free audit")
-    goal: "book_call"              # Goal of outreach: book_call, start_trial, get_reply
-    booking_method: "calendar_link" # calendar_link, suggest_times, ask_preference
-    booking_url: ""                # Calendar link URL (if using calendar_link method)
-    meeting_duration: "15 minutes" # How long the call is
-    meeting_owner: ""              # Who takes the meeting (name or role)
-
+    primary: ''
+    entry: ''
+    goal: book_call
+    booking_method: calendar_link
+    booking_url: ''
+    meeting_duration: 15 minutes
+    meeting_owner: ''
 icp:
   industries:
-    - "SaaS"
-    - "Marketing Agency"
-  company_size: "10-200 employees"
+  - SaaS
+  - Marketing Agency
+  company_size: 10-200 employees
   titles:
-    - "VP Marketing"
-    - "Head of Growth"
-    - "CMO"
-    - "Director of Marketing"
+  - VP Marketing
+  - Head of Growth
+  - CMO
+  - Director of Marketing
   geography:
-    - "United States"
-  # Roles that signal a company is in-market RIGHT NOW (a company hiring a
-  # "Head of Growth" is shopping for growth tooling). Used for careers-page
-  # scanning and job-board discovery. Empty = fall back to titles above.
+  - United States
   hiring_signals: []
-
 channels:
   email:
-    enabled: true
+    enabled: false              # lead collection & manual review mode
     provider: "gmail"          # gmail (recommended) | microsoft | smtp | instantly
     max_daily_sends: 50
     require_approval: true      # native: review in Outbox; Instantly: sending held
@@ -68,7 +65,7 @@ channels:
     # Connect it (`sellbird trulyinbox connect`) and `sellbird warmup` reads
     # whether this mailbox is actually warmed.
     warmup:
-      start_date: ""            # YYYY-MM-DD; blank = no ramp
+      start_date: ""
       min_days: 14
       start_sends: 5
       daily_increase: 3
@@ -97,13 +94,12 @@ channels:
       link: ""                  # optional web address the logo opens
       direction: "auto"         # rtl for Hebrew or Arabic email
   linkedin:
-    enabled: false             # explicit opt-in; credentials alone do not enable it
+    enabled: false
     max_daily_connections: 20
     max_daily_messages: 10
-
 usage:
-  max_daily_claude_percent: 80
-  heartbeat_interval_minutes: 15
+  max_daily_claude_percent: 50.0
+  heartbeat_interval_minutes: 30
   quiet_hours:
     start: "22:00"
     end: "07:00"
@@ -134,8 +130,6 @@ compliance:
   # Sellbird at once. If you trained Sellbird, set it in sellbird.local.yaml instead:
   # that file wins.
   do_not_contact: []
-  #   - "competitor.example"
-  #   - "jane@acme.example"
   precleared:
     enabled: false
     sender_country: ""          # GB or US: where your business is based
@@ -152,3 +146,7 @@ compliance:
 # every email to 220 words and one link. skills/email_rules.md is gitignored.
 # writer:
 #   email_rules: "skills/email_rules.md"
+
+brain:
+  provider: "antigravity"      # antigravity (Gemini via Antigravity) | claude | codex
+  model: "gemini-3.8-flash-high"

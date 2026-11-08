@@ -202,6 +202,31 @@ async def test_stage_campaign_renders_and_respects_approval(state):
 
 
 @pytest.mark.asyncio
+async def test_send_only_stages_initial_email_and_blocks_queued_followups(state, monkeypatch):
+    pid = await seed_prospect(state, email="recipient@example.net")
+    campaign = await seed_campaign(state, [pid])
+    sender = make_sender(state, FakeProvider(), require_approval=True)
+    # Queue a full sequence first, as if switching an existing installation.
+    await sender._stage_campaign_native(campaign)
+    queued = await state.get_outbox(status="pending_review")
+    monkeypatch.setattr(sender.config.channels.email, "smtp_send_only", True, raising=False)
+    followup = next(item for item in queued if item["step"] == 2)
+    reason = await sender._blocked(followup, await state.get_prospect(pid), False)
+    assert reason[0] == "cancelled"
+    assert "manually" in reason[1]
+    reply = dict(followup, kind="reply", step=0)
+    assert (await sender._blocked(reply, await state.get_prospect(pid), False))[0] == "cancelled"
+    # A new campaign only stages its initial email, awaiting review.
+    pid2 = await seed_prospect(state, email="other@example.net")
+    campaign2 = await seed_campaign(state, [pid2])
+    await sender._stage_campaign_native(campaign2)
+    pending = [i for i in await state.get_outbox(status="pending_review")
+               if i["prospect_id"] == pid2]
+    assert [i["step"] for i in pending] == [1]
+    assert sender.provider.sent == []
+
+
+@pytest.mark.asyncio
 async def test_stage_skips_unverified(state):
     pid = await seed_prospect(state, email="guess@acme.com", estatus="guess")
     await seed_campaign(state, [pid])

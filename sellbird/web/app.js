@@ -2182,14 +2182,118 @@ function fbCampaign(i) {
 
 // Search and status filter live outside the table, so the 15-second refresh
 // re-renders rows without losing what you typed.
-let _contactQuery = '', _contactFilter = 'all';
+let _contactQuery = '', _contactFilter = 'all', _contactSort = 'date_desc', _whyLeadId = null;
 const CONTACT_FILTERS = [
   ['all', 'All', null],
+  ['has_linkedin', 'With LinkedIn', null],
+  ['ready_to_reach', 'Ready to Reach', null],
   ['todo', 'To write', ['new', 'queued']],
   ['contacted', 'Contacted', ['contacted']],
   ['replied', 'Replied', ['replied', 'interested', 'meeting']],
   ['closed', 'Closed out', null],
 ];
+
+function toggleWhyLead(id) {
+  _whyLeadId = (_whyLeadId === id) ? null : id;
+  renderContacts();
+}
+
+function copyLeadText(type, id) {
+  const p = _prospects.find(x => x.id === id);
+  if (!p) return;
+  let text = '';
+  if (type === 'email') text = p.email || '';
+  else if (type === 'notes') text = p.personalization_notes || '';
+  else if (type === 'linkedin') text = p.linkedin_url || '';
+  else if (type === 'all') {
+    text = `Name: ${p.first_name} ${p.last_name}\nTitle: ${p.title}\nCompany: ${p.company}\nEmail: ${p.email} (${p.email_status})\nLinkedIn: ${p.linkedin_url || 'N/A'}\nDiscovered: ${p.created_at}\n\nFit / Why Lead:\n${p.personalization_notes}`;
+  }
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('Copied to clipboard!', 'success');
+  }).catch(() => {
+    showToast('Failed to copy', 'error');
+  });
+}
+
+function whyLeadPanel(p) {
+  const notes = (p.personalization_notes || '').trim();
+  const name = [p.first_name, p.last_name].filter(Boolean).join(' ') || 'Prospect';
+  
+  let roleMatch = '', productFit = '', merithqAngle = '', reachability = '';
+  if (notes) {
+    const lines = notes.split('\n');
+    let current = '';
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (line.startsWith('Role Match:')) { current = 'role'; roleMatch = line.replace('Role Match:', '').trim(); }
+      else if (line.startsWith('Product Fit:')) { current = 'product'; productFit = line.replace('Product Fit:', '').trim(); }
+      else if (line.startsWith('MeritHQ Angle:')) { current = 'merithq'; merithqAngle = line.replace('MeritHQ Angle:', '').trim(); }
+      else if (line.startsWith('Reachability:')) { current = 'reach'; reachability = line.replace('Reachability:', '').trim(); }
+      else if (current === 'role') { roleMatch += ' ' + line; }
+      else if (current === 'product') { productFit += ' ' + line; }
+      else if (current === 'merithq') { merithqAngle += ' ' + line; }
+      else if (current === 'reach') { reachability += ' ' + line; }
+    }
+  }
+
+  let cards = '';
+  if (roleMatch || productFit || merithqAngle || reachability) {
+    cards = '<div class="why-lead-grid">' +
+      (roleMatch ? '<div class="why-lead-card"><h5>🎯 Role & Decision Authority</h5><p>' + escHtml(roleMatch) + '</p></div>' : '') +
+      (productFit ? '<div class="why-lead-card"><h5>🏢 Product & Tech Fit</h5><p>' + escHtml(productFit) + '</p></div>' : '') +
+      (merithqAngle ? '<div class="why-lead-card"><h5>🚀 MeritHQ Offering Angle</h5><p>' + escHtml(merithqAngle) + '</p></div>' : '') +
+      (reachability ? '<div class="why-lead-card"><h5>📬 Reachability Strategy</h5><p>' + escHtml(reachability) + '</p></div>' : '') +
+      '</div>';
+  } else if (notes) {
+    cards = '<div class="why-lead-card"><h5>💡 Lead Qualification Notes</h5><p style="white-space:pre-wrap;">' + escHtml(notes) + '</p></div>';
+  } else {
+    cards = '<div class="why-lead-card muted"><p>No custom personalization notes generated yet.</p></div>';
+  }
+
+  const linkedinBtn = safeHref(p.linkedin_url) ?
+    '<a href="' + safeHref(p.linkedin_url) + '" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm" style="color:#0a66c2;font-weight:600;display:inline-flex;align-items:center;gap:4px;">' +
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"/></svg>' +
+    'Open LinkedIn Profile ↗</a>' : '';
+
+  const emailBtn = p.email ?
+    '<button class="btn btn-ghost btn-sm" onclick="copyLeadText(\'email\', \'' + p.id + '\')">Copy Email</button>' : '';
+
+  const notesBtn = notes ?
+    '<button class="btn btn-ghost btn-sm" onclick="copyLeadText(\'notes\', \'' + p.id + '\')">Copy Fit Notes</button>' : '';
+
+  const allBtn =
+    '<button class="btn btn-ghost btn-sm" onclick="copyLeadText(\'all\', \'' + p.id + '\')">Copy Lead Dossier</button>';
+
+  return '<div class="why-lead-panel">' +
+    '<div class="why-lead-head">' +
+      '<div>' +
+        '<h4 style="margin:0 0 4px;font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px;">' +
+          '<span>Why ' + escHtml(name) + ' is a Potential Lead</span>' +
+          '<span class="badge t-neutral" style="font-size:11px;">Score: ' + (p.score || 0) + '</span>' +
+        '</h4>' +
+        '<div class="optout-meta" style="font-size:12px;color:var(--text-2);">' +
+          escHtml(p.title || 'Contact') + ' at <b>' + escHtml(p.company || '') + '</b> · Added ' + formatDate(p.created_at) + ' (' + relTime(p.created_at) + ')' +
+        '</div>' +
+      '</div>' +
+      '<div class="why-lead-actions">' +
+        linkedinBtn +
+        emailBtn +
+        notesBtn +
+        allBtn +
+        '<button class="btn btn-ghost btn-sm" onclick="toggleWhyLead(\'' + p.id + '\')">Close</button>' +
+      '</div>' +
+    '</div>' +
+    cards +
+    '<div class="why-lead-contact-box">' +
+      '<div class="why-lead-contact-item"><b>Email:</b> <span>' + escHtml(p.email || '—') + '</span> ' + emailTag(p) + '</div>' +
+      (safeHref(p.linkedin_url) ? '<div class="why-lead-contact-item"><b>LinkedIn:</b> <a href="' + safeHref(p.linkedin_url) + '" target="_blank" rel="noopener noreferrer" style="color:#0a66c2;">' + escHtml(p.linkedin_url) + '</a></div>' : '') +
+      (p.phone ? '<div class="why-lead-contact-item"><b>Phone:</b> <span>' + escHtml(p.phone) + '</span></div>' : '') +
+      '<div class="why-lead-contact-item"><b>Pipeline Status:</b> ' + badge(p.status) + '</div>' +
+      '<div class="why-lead-contact-item"><b>Date Discovered:</b> <span title="' + escHtml(p.created_at || '') + '">' + formatDate(p.created_at) + '</span></div>' +
+    '</div>' +
+  '</div>';
+}
 
 async function loadProspects() {
   const el = document.getElementById('prospects-table');
@@ -2202,21 +2306,33 @@ async function loadProspects() {
     return;
   }
   if (!document.getElementById('contact-rows')) {
-    el.innerHTML = '<div class="toolbar">' +
-      '<label class="search">' + icon('discover') +
-        '<input class="form-input" id="contact-search" type="search" placeholder="Search name, company, email" ' +
+    el.innerHTML = '<div class="toolbar" style="flex-wrap:wrap;gap:8px;align-items:center;">' +
+      '<label class="search" style="flex:1 1 200px;">' + icon('discover') +
+        '<input class="form-input" id="contact-search" type="search" placeholder="Search name, company, email, title..." ' +
         'aria-label="Search contacts" oninput="_contactQuery=this.value;renderContacts()"></label>' +
       '<div class="segmented" id="contact-filters" role="group" aria-label="Filter by status"></div>' +
+      '<div style="display:inline-flex;align-items:center;gap:6px;margin-left:auto;">' +
+        '<span style="font-size:12px;color:var(--text-2);white-space:nowrap;">Sort:</span>' +
+        '<select class="form-input" id="contact-sort" style="padding:2px 8px;font-size:12px;height:28px;" onchange="_contactSort=this.value;renderContacts()">' +
+          '<option value="date_desc">Newest Added</option>' +
+          '<option value="date_asc">Oldest Added</option>' +
+          '<option value="score_desc">Highest Score</option>' +
+          '<option value="name_asc">Name / Company</option>' +
+        '</select>' +
+      '</div>' +
       '</div><div id="contact-rows"></div>';
-    // A rebuild after an offline blip must show the search still applied.
     document.getElementById('contact-search').value = _contactQuery;
   }
+  const sortSel = document.getElementById('contact-sort');
+  if (sortSel) sortSel.value = _contactSort;
   renderContacts();
 }
 
 function contactMatches(p, f) {
   const known = ['new', 'queued', 'contacted', 'replied', 'interested', 'meeting'];
   if (f === 'all') return true;
+  if (f === 'has_linkedin') return Boolean(p.linkedin_url && p.linkedin_url.trim());
+  if (f === 'ready_to_reach') return Boolean(p.email_status === 'verified' || (p.linkedin_url && p.linkedin_url.trim() && p.email_status !== 'invalid'));
   if (f === 'closed') return !known.includes(p.status);
   const hit = CONTACT_FILTERS.find(x => x[0] === f);
   return !!(hit && hit[2] && hit[2].includes(p.status));
@@ -2236,18 +2352,35 @@ function renderContacts() {
   ).join('');
 
   const rows = _prospects.map((p, i) => [p, i]).filter(([p]) => contactMatches(p, _contactFilter) && found(p));
+  rows.sort(([a], [b]) => {
+    if (_contactSort === 'date_desc') return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+    if (_contactSort === 'date_asc') return String(a.created_at || '').localeCompare(String(b.created_at || ''));
+    if (_contactSort === 'score_desc') return (b.score || 0) - (a.score || 0);
+    if (_contactSort === 'name_asc') {
+      const na = (a.first_name || a.company || '').toLowerCase();
+      const nb = (b.first_name || b.company || '').toLowerCase();
+      return na.localeCompare(nb);
+    }
+    return 0;
+  });
+
   if (!rows.length) {
     rowsEl.innerHTML = '<div class="table-card">' + emptyState(icon('discover'), 'No matches',
       'Nothing matches that search and filter.') + '</div>';
     return;
   }
-  let html = '<div class="table-card"><table class="nowrap"><thead><tr><th>Name</th><th>Company</th><th>Email</th>' +
-    '<th>Score</th><th>Status</th><th>Source</th><th>Added</th><th></th></tr></thead><tbody>';
+  let html = '<div class="table-card"><table class="nowrap"><thead><tr><th>Name & Role</th><th>Company</th><th>Contact Details</th>' +
+    '<th>Score</th><th>Status</th><th>Source</th><th>Added</th><th>Actions</th></tr></thead><tbody>';
   for (const [p, i] of rows) {
     html += '<tr><td><div class="cell-row"><span class="avatar">' + initials(p.first_name, p.last_name) + '</span>' +
         '<div class="cell-stack"><span class="cell-main">' + escHtml(p.first_name) + ' ' + escHtml(p.last_name) + '</span>' +
-        '<span class="cell-sub">' + escHtml(p.title) + '</span></div></div></td>' +
-      '<td>' + escHtml(p.company) + '</td>' +
+        '<span class="cell-sub">' + escHtml(p.title) + '</span>' +
+        (safeHref(p.linkedin_url) ? '<a href="' + safeHref(p.linkedin_url) + '" target="_blank" rel="noopener noreferrer" class="chip-linkedin" title="Open LinkedIn Profile" onclick="event.stopPropagation()">' +
+          '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="display:inline-block;vertical-align:-1px;"><path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"/></svg> LinkedIn ↗</a>' : '') +
+        '</div></div></td>' +
+      '<td><div class="cell-stack"><span class="cell-main">' + escHtml(p.company) + '</span>' +
+        (safeHref(p.website) ? '<a href="' + safeHref(p.website) + '" target="_blank" rel="noopener noreferrer" class="cell-sub" style="color:var(--text-2);text-decoration:underline;">' + escHtml(p.website.replace(/^https?:\/\//, '').replace(/\/$/, '')) + '</a>' : '') +
+      '</div></td>' +
       '<td><div class="cell-stack"><span>' + escHtml(p.email) + '</span>' +
         '<span class="cell-sub">' + [emailTag(p).trim(), p.phone ? escHtml(p.phone) +
           (p.phone_verified ? ' <span class="verified" title="Phone verified">&#10003;</span>' : '') : '']
@@ -2256,13 +2389,21 @@ function renderContacts() {
       '<td>' + (p.score || p.score === 0 ? meterHtml(p.score) : '') + '</td>' +
       '<td>' + badge(p.status) + '</td>' +
       '<td class="muted">' + sourceLabel(p.source) + '</td>' +
-      '<td class="muted" style="white-space:nowrap">' + relTime(p.created_at) + '</td>' +
-      '<td><div class="cell-row">' + (p.status === 'opted_out' || p.opt_out_undone || _optOut.id === p.id
-        ? '<button class="btn btn-ghost btn-sm" onclick="toggleOptOut(' + i + ')" ' +
-          'aria-expanded="' + (_optOut.id === p.id) + '" title="What made Sellbird stop emailing them">' +
-          (p.status === 'opted_out' ? 'Why?' : 'Opt-out history') + '</button>' : '') +
+      '<td class="muted" style="white-space:nowrap" title="' + escHtml(p.created_at || '') + '">' +
+        '<div style="font-weight:500;color:var(--text-1);">' + formatDate(p.created_at).split(',')[0] + '</div>' +
+        '<div style="font-size:11px;color:var(--text-3);">' + relTime(p.created_at) + '</div>' +
+      '</td>' +
+      '<td><div class="cell-row">' +
+        '<button class="btn btn-secondary btn-sm" onclick="toggleWhyLead(\'' + p.id + '\')" ' +
+          'title="See why this person is a fit for MeritHQ">' +
+          (_whyLeadId === p.id ? 'Hide Fit' : 'Why Lead?') + '</button>' +
+        (p.status === 'opted_out' || p.opt_out_undone || _optOut.id === p.id
+          ? '<button class="btn btn-ghost btn-sm" onclick="toggleOptOut(' + i + ')" ' +
+            'aria-expanded="' + (_optOut.id === p.id) + '" title="What made Sellbird stop emailing them">' +
+            (p.status === 'opted_out' ? 'Why?' : 'Opt-out history') + '</button>' : '') +
         '<button class="btn btn-ghost btn-sm row-action" onclick="fbProspect(' + i + ')" ' +
         'title="Leave feedback on this contact">Feedback</button></div></td></tr>';
+    if (_whyLeadId === p.id) html += '<tr class="detail-row"><td colspan="8">' + whyLeadPanel(p) + '</td></tr>';
     if (_optOut.id === p.id) html += '<tr class="detail-row"><td colspan="8">' + optOutPanel(p) + '</td></tr>';
   }
   rowsEl.innerHTML = html + '</tbody></table></div>' +
