@@ -8,6 +8,7 @@
 <!-- First, so the token leaves the address bar before anything else runs. -->
 <script src="/static/auth.js"></script>
 <link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/partnerships.css">
 <link rel="icon" href="/static/sellbird-mark.svg" type="image/svg+xml">
 </head>
 <body>
@@ -84,6 +85,7 @@
       <button onclick="showTab('companies', this)"><svg class="icon" aria-hidden="true"><use href="#i-companies"/></svg><span class="label">Companies</span></button>
       <button onclick="showTab('prospects', this)"><svg class="icon" aria-hidden="true"><use href="#i-contacts"/></svg><span class="label">Contacts</span></button>
       <button onclick="showTab('campaigns', this)"><svg class="icon" aria-hidden="true"><use href="#i-campaigns"/></svg><span class="label">Campaigns</span></button>
+      <button onclick="showTab('partnerships', this)"><svg class="icon" aria-hidden="true"><use href="#i-companies"/></svg><span class="label">Partnerships</span></button>
     </div>
     <div class="nav-group">
       <div class="nav-label">System</div>
@@ -564,10 +566,12 @@
   </div>
 </div>
 
+<div id="partnerships" class="section"><h1>Partnerships</h1><div id="partnerships-content"></div></div>
 </div>
 </main>
 </div>
 
 <script src="/static/app.js"></script>
+<script src="/static/partnerships.js"></script>
 </body>
 </html>

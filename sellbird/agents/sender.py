@@ -447,6 +447,8 @@ class Sender:
                 continue
             if await self.state.get_setting(MANUAL_SEND_KEY + prospect.id):
                 continue  # the user emailed them by hand
+            if await self.state.company_in_partnership_track(prospect.company_id):
+                continue  # written to one to one, from Partnerships
             if await self.state.is_suppressed(email):  # never emailed, on Instantly too
                 logger.debug(f"Sender: Skipping {email} (suppressed).")
                 continue
@@ -591,6 +593,14 @@ class Sender:
                 f"Sender: {stale} email(s) were interrupted mid-send and won't be "
                 "retried. Check your Sent folder; they're under Didn't send."
             )
+        # Drafts for a company that has since joined the partnership track.
+        from sellbird.partnerships import release_general_outbox
+        released = await release_general_outbox(self.state)
+        if released:
+            logger.info(
+                f"Sender: cancelled {released} cold email(s) for companies in the "
+                "partnership track."
+            )
         paused = await self.state.get_setting(KILL_SWITCH_KEY)
         if paused:
             logger.warning(
@@ -658,6 +668,7 @@ class Sender:
         staged = 0
         skipped = 0
         answered = 0
+        one_to_one = 0
         now = _utcnow()
         seen_emails: set[str] = set()
         window = send_window_of(self.config)
@@ -678,6 +689,9 @@ class Sender:
                 continue
             if await self.state.colleague_who_replied(prospect.id):
                 answered += 1     # their company already answered
+                continue
+            if await self.state.company_in_partnership_track(prospect.company_id):
+                one_to_one += 1   # written to by hand, from Partnerships
                 continue
             seen_emails.add(email)
 
@@ -726,6 +740,11 @@ class Sender:
             logger.info(
                 f"Sender: left out {answered} prospect(s) from '{campaign.name}': "
                 f"{COLLEAGUE_REPLIED} at their company."
+            )
+        if one_to_one:
+            logger.info(
+                f"Sender: left out {one_to_one} prospect(s) from '{campaign.name}': "
+                "their company is in the partnership track."
             )
         if staged:
             mode = "awaiting your approval" if require_approval else "approved"
@@ -817,6 +836,10 @@ class Sender:
                 return "cancelled", "send-only SMTP: handle replies and follow-ups manually"
         if prospect is None:
             return "failed", "prospect missing"
+        from sellbird.partnerships import send_verdict as partnership_verdict
+        partnership_hold = await partnership_verdict(self.state, item)
+        if partnership_hold:
+            return partnership_hold
         # A suppressed address or domain is never emailed, whatever the kind.
         suppressed = await self.state.is_suppressed(item["to_email"])
         if suppressed:
@@ -1138,6 +1161,16 @@ class Sender:
                                                     error=f"held: {NO_HEADERS_HOLD}")
                 continue
             extra = {"headers": headers} if headers else {}
+            from sellbird.partnerships import email_attachment
+            try:
+                attachment = await email_attachment(self.state, item)
+                if attachment:
+                    if not getattr(provider, "carries_attachments", False):
+                        raise ValueError("This provider does not support the reviewed PDF attachment.")
+                    extra["attachments"] = (attachment,)
+            except ValueError as exc:
+                await self.state.update_outbox_item(item["id"], status="pending_review", error=str(exc))
+                continue
             try:
                 result = await provider.send_email(
                     item["to_email"], item["subject"], body,

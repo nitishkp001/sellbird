@@ -19,6 +19,7 @@ usage:        { max_daily_claude_percent, heartbeat_interval_minutes, quiet_hour
 brain:        { provider: claude | codex, model, reasoning_effort }   # optional; claude by default
 writer:       { humanizer }   # optional; true adds one editing pass per batch using ~/.claude/skills/humanizer/SKILL.md
               # email_rules: your own markdown rules for the emails' shape (see The skills library)
+partnerships: { brief_kit, output_dir }   # optional; the design briefs are printed in, and the folder they are saved to (docs/partnerships.md)
 ```
 
 `min_write_score` (0-100, default 0) is the lowest Scout fit score the writer

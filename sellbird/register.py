@@ -122,6 +122,9 @@ async def build_register(query_db, config, company_id: str | None = None) -> lis
         for r in rows:
             by.setdefault(r["company_id"], []).append(r)
 
+    tracked = {r["company_id"] for r in await query_db(
+        "SELECT company_id FROM partnership_accounts WHERE 1=1" + one.format(col="company_id"), args)}
+
     dnc = _do_not_contact(config)
     channels = getattr(config, "channels", None)
     send_to_risky = bool(getattr(getattr(channels, "email", None), "send_to_risky", False))
@@ -131,18 +134,24 @@ async def build_register(query_db, config, company_id: str | None = None) -> lis
         ps, obs = by_p.get(cid, []), by_obs.get(cid, [])
         fit, reasons = company_fit(c, ps, obs, config, dnc)
         status, why = company_status(c, ps, by_o.get(cid, []), obs, dnc, send_to_risky)
+        if cid in tracked and status not in {"Excluded", "Opted out", "Replied", "Emailed"}:
+            # Cold email skips the company on purpose: say so, not "waiting for the writer".
+            status, why = "Partnership", "Written to one to one from the Partnerships tab"
         sector, area = c.get("industry") or "", c.get("location") or ""
         found = f"Found via {c['source']}" if c.get("source") else ""
+        notes = (c.get("notes") or "").strip()
+        why_selected = notes if notes else "; ".join(x for x in (found, " · ".join(reasons)) if x)
         rows.append({
             # id and fit_reasons are for the dashboard; the CSV leaves them out.
             "id": cid,
             "fit_reasons": reasons,
+            "notes": notes,
             "company": c.get("name") or c.get("domain") or "",
             "website": c.get("website") or (f"https://{c['domain']}" if c.get("domain") else ""),
             "sector": sector,
             "area": area,
             "fit": fit,
-            "why_selected": "; ".join(x for x in (found, " · ".join(reasons)) if x),
+            "why_selected": why_selected,
             "status": status,
             "why_not_contacted": why,
             "contacts": _contacts(ps),

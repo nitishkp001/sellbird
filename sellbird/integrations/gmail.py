@@ -100,6 +100,7 @@ def _save_token(data: dict):
 class GmailProvider(MailProvider):
     name = "gmail"
     carries_headers = True
+    carries_attachments = True
 
     def __init__(self, config, env, transport=None, *,
                  identity: MailIdentity | None = None,
@@ -242,6 +243,7 @@ class GmailProvider(MailProvider):
         thread_ref: str = "",
         in_reply_to: str = "",
         headers=(),
+        attachments=(),
     ) -> SendResult:
         try:
             sig = load_signature(self.config)
@@ -258,6 +260,10 @@ class GmailProvider(MailProvider):
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = in_reply_to
         set_body(msg, body, sig)
+        for attachment in attachments:
+            major, minor = attachment['content_type'].split('/', 1)
+            msg.add_attachment(attachment['data'], maintype=major, subtype=minor,
+                               filename=attachment['filename'])
 
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
         payload: dict = {"raw": raw}

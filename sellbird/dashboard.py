@@ -583,7 +583,8 @@ async def get_companies():
     """Companies with contact counts, fit score and register status, best fit first."""
     rows = await query_db("""
         SELECT c.*,
-            (SELECT COUNT(*) FROM prospects p WHERE p.company_id = c.id) as contact_count
+            (SELECT COUNT(*) FROM prospects p WHERE p.company_id = c.id) as contact_count,
+            COALESCE((SELECT a.id FROM partnership_accounts a WHERE a.company_id = c.id), '') as partnership_account_id
         FROM companies c ORDER BY c.created_at DESC
     """)
     try:
@@ -595,6 +596,8 @@ async def get_companies():
             if r:
                 c["fit"], c["fit_reasons"] = r["fit"], r["fit_reasons"]
                 c["register_status"], c["register_why"] = r["status"], r["why_not_contacted"]
+                c["why_selected"] = r.get("why_selected", "")
+                c["notes"] = r.get("notes", c.get("notes", ""))
         rows.sort(key=lambda c: c.get("fit", 0), reverse=True)
     except Exception as e:
         # A config that won't load must not take the Companies tab down with it.
@@ -640,7 +643,9 @@ async def get_company_profile(company_id: str):
         register = next(iter(await build_register(query_db, load_config(), company_id)), {})
     except Exception as e:
         logger.warning(f"Company profile register unavailable: {e}")
-    return {"company": rows[0], "register": register, "observations": observations}
+    account = await query_db("SELECT id FROM partnership_accounts WHERE company_id = ?", (company_id,))
+    return {"company": rows[0], "register": register, "observations": observations,
+            "partnership_account_id": account[0]["id"] if account else ""}
 
 
 @app.get("/api/companies/{company_id}/contacts")
@@ -1067,6 +1072,11 @@ async def _with_context(items: list[dict]) -> list[dict]:
     campaigns = {r["id"]: r["name"] for r in (await query_db(
         f"SELECT id, name FROM campaigns WHERE id IN ({_in(cids)})",
         tuple(cids)) if cids else [])}
+    item_ids = [i['id'] for i in items]
+    attached = {r['outbox_id']:r for r in (await query_db(
+        'SELECT b.outbox_id,b.account_id,a.id,a.version FROM partnership_email_bindings b '
+        'JOIN partnership_assets a ON a.id=b.asset_id '
+        f'WHERE b.outbox_id IN ({_in(item_ids)})',tuple(item_ids)) if item_ids else [])}
 
     company_ids = sorted({p["company_id"] for p in people.values() if p.get("company_id")})
     signals: dict[str, dict[str, str]] = {}
@@ -1117,6 +1127,7 @@ async def _with_context(items: list[dict]) -> list[dict]:
             "email_status": p.get("email_status", ""),
             "score": p.get("score"),
             "notes": p.get("personalization_notes", ""),
+            "partnership_asset": attached.get(item['id']),
             "signals": signals.get(p.get("company_id"), {}),
         }
     return items
@@ -2751,6 +2762,11 @@ INSTANCE_ID = uuid.uuid4().hex
 @app.get("/api/instance")
 async def get_instance():
     return {"instance": INSTANCE_ID}
+
+
+from sellbird.partnerships import build_router as _partnership_router
+
+app.include_router(_partnership_router(_state))
 
 
 # ── Extensions (sellbird.extensions): their routes, after every built-in one,

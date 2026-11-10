@@ -123,6 +123,7 @@ def _token_url(tenant: str) -> str:
 
 class MicrosoftProvider(MailProvider):
     name = "microsoft"
+    carries_attachments = True
 
     def __init__(self, config, env, transport=None, *,
                  identity: MailIdentity | None = None,
@@ -275,6 +276,7 @@ class MicrosoftProvider(MailProvider):
         thread_ref: str = "",
         in_reply_to: str = "",
         headers=(),
+        attachments=(),
     ) -> SendResult:
         """Draft, then send, so the RFC Message-ID is known (bounces and
         replies are matched on it). A reply is drafted with createReply on
@@ -317,6 +319,14 @@ class MicrosoftProvider(MailProvider):
                     "contentBytes": base64.b64encode(sig.data).decode(),
                     "isInline": True,
                     "contentId": sig.content_id,
+                })
+            for attachment in attachments:
+                await self._request("POST", f"/me/messages/{draft['id']}/attachments", json={
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": attachment['filename'],
+                    "contentType": attachment['content_type'],
+                    "contentBytes": base64.b64encode(attachment['data']).decode(),
+                    "isInline": False,
                 })
             try:
                 await self._request("POST", f"/me/messages/{draft['id']}/send",

@@ -71,6 +71,7 @@ class SmtpSettings:
 class SmtpImapProvider(MailProvider):
     name = "smtp"
     carries_headers = True
+    carries_attachments = True
 
     def __init__(self, config, env, *, identity: MailIdentity | None = None,
                  smtp: SmtpSettings | None = None):
@@ -104,6 +105,7 @@ class SmtpImapProvider(MailProvider):
         thread_ref: str = "",
         in_reply_to: str = "",
         headers=(),
+        attachments=(),
     ) -> SendResult:
         try:
             sig = load_signature(self.config)
@@ -125,6 +127,10 @@ class SmtpImapProvider(MailProvider):
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = in_reply_to
         set_body(msg, body, sig)
+        for attachment in attachments:
+            major, minor = attachment['content_type'].split('/', 1)
+            msg.add_attachment(attachment['data'], maintype=major, subtype=minor,
+                               filename=attachment['filename'])
 
         try:
             await aiosmtplib.send(

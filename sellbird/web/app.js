@@ -417,6 +417,7 @@ function loadCurrentTab() {
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;
+    case 'partnerships': loadPartnerships(); break;
     case 'outbox': loadOutbox(); break;
     case 'conversations': loadConversations(); break;
     case 'activity': loadActivity(); break;
@@ -1744,6 +1745,8 @@ function renderDeskContext(ctx) {
     row('Campaign', ctx.campaign ? escHtml(ctx.campaign) +
       ' <span class="muted">(how they were found, not a fact about them)</span>' : '') +
     row('Writer notes', escHtml(ctx.notes)) +
+    row('Reviewed PDF', ctx.partnership_asset ? 'Version ' + escHtml(ctx.partnership_asset.version) +
+      ' <button class="btn btn-ghost btn-sm" onclick="partnerAsset(' + jsq(ctx.partnership_asset.account_id) + ',' + jsq(ctx.partnership_asset.id) + ',\'pdf\')">Download attached version</button>' : '') +
   '</div>';
 }
 
@@ -2105,12 +2108,17 @@ function companyInfoCard(company, profile) {
   const shown = new Set(['DECISION_MAKER_TITLE', 'CONTACT_FOUND', 'CONTACT_FORM_URL', 'HIRING_ROLE', 'FOUND_IN_SERP', 'TECH_STACK']);
   const other = Object.values(latest).filter(o => !shown.has(o.signal_code));
   let html = '<div class="card" style="margin-bottom:16px"><div class="card-head"><h3>' + escHtml(c.name || c.domain) + '</h3>' +
-    '<span class="meta">' + (typeof company.fit === 'number' ? 'Fit ' + company.fit + ' / 100' : '') + '</span></div>' +
+    '<span class="meta">' + (typeof company.fit === 'number' ? 'Fit ' + company.fit + ' / 100' : '') + '</span>' +
+    (typeof partnerCompanyAction === 'function'
+      ? partnerCompanyAction(c.id || company.id, c.partnership_account_id || company.partnership_account_id || (profile && profile.partnership_account_id) || '')
+      : '') + '</div>' +
     '<table><tbody>' +
     row('Website', link(website, c.domain || website)) +
     row('Sector', escHtml(c.industry)) +
     row('Area', escHtml(c.location)) +
+    (c.notes || reg.notes ? row('MeritHQ Dev Fit', '<div style="background:var(--bg-3);border-left:3px solid var(--accent);padding:10px 14px;border-radius:4px;font-size:13px;line-height:1.5;color:var(--text);margin:2px 0;">' + escHtml(c.notes || reg.notes) + '</div>') : '') +
     row('Why selected', escHtml(reg.why_selected || (company.fit_reasons || []).join(' · '))) +
+    row('Data signals', escHtml((company.fit_reasons || []).join(' · '))) +
     row('Status', '<b>' + escHtml(reg.status || company.register_status || '') + '</b>' +
       (reg.why_not_contacted || company.register_why ? ' — ' + escHtml(reg.why_not_contacted || company.register_why) : '')) +
     row('People named on site', list(people, 8)) +

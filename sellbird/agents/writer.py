@@ -154,6 +154,19 @@ class Writer:
             p for p in prospects_with_email
             if not await self.state.colleague_who_replied(p.id)
         ]
+        # A company in the partnership track is written to one to one, from
+        # the Partnerships tab: the template sequence must not also go there.
+        in_track = [
+            p for p in prospects_with_email
+            if await self.state.company_in_partnership_track(p.company_id)
+        ]
+        if in_track:
+            logger.info(
+                f"Writer: Skipping {len(in_track)} prospect(s) at companies in the "
+                "partnership track."
+            )
+            held = {p.id for p in in_track}
+            prospects_with_email = [p for p in prospects_with_email if p.id not in held]
         if not prospects_with_email:
             logger.info(
                 "Writer: No prospects with deliverable (verified/risky) emails yet."

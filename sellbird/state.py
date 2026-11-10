@@ -102,6 +102,15 @@ def _company_answered(p: str) -> str:
     """SQL: someone at prospect ``p``'s company has replied."""
     return (f"EXISTS (SELECT 1 FROM prospects c, settings s "
             f"WHERE s.key = '{COMPANY_STOP_KEY}' || c.id AND {_colleagues(p, 'c')})")
+
+
+def _in_partnership_track(p: str) -> str:
+    """SQL: prospect ``p``'s company is a partnership account. Those are
+    written to one to one, never by the cold-email pipeline."""
+    return (f"({p}.company_id != '' AND EXISTS (SELECT 1 FROM partnership_accounts pa "
+            f"WHERE pa.company_id = {p}.company_id))")
+
+
 # Outbox error on what autopilot had approved when it was turned off.
 AUTOPILOT_OFF_REASON = "waiting for you: autopilot was turned off before it went out"
 # Outbox error on an approved cold email the compliance check couldn't answer
@@ -583,6 +592,11 @@ _CONVERSATION_COLUMNS = frozenset({
     "prospect_id", "campaign_id", "channel",
     "thread_json", "intent", "stage", "status", "mailbox_id",
 })
+
+
+from sellbird.partnerships import SCHEMA as _PARTNERSHIP_SCHEMA
+
+MIGRATIONS.append(_PARTNERSHIP_SCHEMA)
 
 
 class StateManager:
@@ -2292,10 +2306,23 @@ class StateManager:
             async with db.execute(
                 f"""SELECT COUNT(*) FROM prospects p
                     WHERE status = 'new' AND email != ''
-                      AND email_status IN ({marks}) AND NOT {_company_answered('p')}""",
+                      AND email_status IN ({marks}) AND NOT {_company_answered('p')}
+                      AND NOT {_in_partnership_track('p')}""",
                 WRITABLE_EMAIL_STATUSES,
             ) as cursor:
                 return (await cursor.fetchone())[0]
+
+    async def company_in_partnership_track(self, company_id: str) -> bool:
+        """Whether this company is a partnership account. The partnership
+        track writes to its people one to one, so the cold-email pipeline
+        leaves the whole company alone, whoever else works there."""
+        if not company_id:
+            return False
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT 1 FROM partnership_accounts WHERE company_id = ?", (company_id,)
+            ) as cursor:
+                return await cursor.fetchone() is not None
 
     async def count_recent_unusable_prospects(self, hours: int = 24) -> int:
         """New prospects found in the last ``hours`` that the Writer can't use."""
@@ -2804,4 +2831,3 @@ class StateManager:
             # Claude budget the rest of the loop is rationing.
             "unprofiled": await self.count_companies_needing_profile(),
         }
-

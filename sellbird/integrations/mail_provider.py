@@ -187,6 +187,7 @@ class MailProvider(ABC):
 
     # Whether send_email can add custom headers (List-Unsubscribe and such).
     carries_headers = False
+    carries_attachments = False
 
     name: str = "base"
 
@@ -203,9 +204,12 @@ class MailProvider(ABC):
         thread_ref: str = "",
         in_reply_to: str = "",
         headers: Sequence[tuple[str, str]] = (),
+        attachments: Sequence[dict] = (),
     ) -> SendResult:
         """Send one plain-text email. Reply threading when refs are given.
-        ``headers`` are extra headers (only passed when ``carries_headers``)."""
+        ``headers`` are extra headers (only passed when ``carries_headers``).
+        Attachments are filename/content_type/data dictionaries, only passed
+        to providers declaring carries_attachments."""
 
     @abstractmethod
     async def get_replies(self, limit: int = 50) -> list[InboundMessage]:

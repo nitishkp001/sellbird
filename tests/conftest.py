@@ -67,3 +67,12 @@ def _no_home_seeding(monkeypatch):
     import sellbird.home
 
     monkeypatch.setattr(sellbird.home, "seed_home", lambda home, source: [])
+
+
+@pytest.fixture(autouse=True)
+def _no_operator_brief_kit(monkeypatch):
+    """Tests never print briefs in the operator's own kit, or save them to their real folders, from their real config."""
+    import sellbird.partnerships
+
+    monkeypatch.setattr(sellbird.partnerships, "configured_kit_dir", lambda: "")
+    monkeypatch.setattr(sellbird.partnerships, "configured_output_dir", lambda: "")

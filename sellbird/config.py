@@ -761,6 +761,15 @@ def load_email_rules(config) -> str:
     return text
 
 
+class PartnershipsConfig(BaseModel):
+    # A folder with kit.json, an HTML template and its fonts and logo: the design every partnership
+    # brief is printed in (docs/partnerships.md, "Brief kit"). Empty uses the built-in brief.
+    brief_kit: str = ""
+    # Where each generated brief is saved as files: a folder per account holding its personalised HTML and
+    # the PDF printed from it. Empty uses data/partnership-briefs beside the database.
+    output_dir: str = ""
+
+
 class SellbirdConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
@@ -770,6 +779,7 @@ class SellbirdConfig(BaseModel):
     brain: BrainConfig = BrainConfig()
     compliance: ComplianceConfig = ComplianceConfig()
     writer: WriterConfig = WriterConfig()
+    partnerships: PartnershipsConfig = PartnershipsConfig()
     # The file it was loaded from, so a running Sellbird can re-read the
     # sending mode from that same file (refresh_sending_mode).
     _source_path: str | None = PrivateAttr(default=None)
