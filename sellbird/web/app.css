@@ -720,6 +720,10 @@ details[open] > summary::before { rotate: 45deg; }
 }
 .desk-context .k { color: var(--text-3); }
 .desk-context .v { overflow-wrap: anywhere; }
+.desk-list-v { margin: 0; padding-left: 16px; }
+.desk-review { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--border, rgba(127,127,127,.3)); border-radius: 8px; font-size: 13px; }
+.desk-review .k { color: var(--text-3); margin-top: 6px; }
+.desk-review ul { margin: 2px 0 0; padding-left: 18px; }
 .desk-edit-subject, .desk-edit-body {
   display: block; width: 100%; margin-top: var(--sp-4);
   padding: 10px 12px; font: inherit; color: var(--text); background: var(--surface);

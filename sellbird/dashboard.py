@@ -1056,6 +1056,13 @@ def _in(ids) -> str:
     return ",".join("?" for _ in ids)
 
 
+def _json_or_none(raw):
+    try:
+        return json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
 async def _with_context(items: list[dict]) -> list[dict]:
     """Attach the campaign, company, contact and signals behind each draft."""
     if not items:
@@ -1066,7 +1073,8 @@ async def _with_context(items: list[dict]) -> list[dict]:
     people = {r["id"]: r for r in (await query_db(
         "SELECT p.id, p.first_name, p.last_name, p.title, p.source, p.email_status, "
         "p.score, p.personalization_notes, p.company_id, c.name AS company_name, "
-        "c.domain, c.website, c.description, c.industry AS found_by "
+        "c.domain, c.website, c.description, c.industry AS found_by, "
+        "c.location, c.research_json "
         "FROM prospects p LEFT JOIN companies c ON c.id = p.company_id "
         f"WHERE p.id IN ({_in(pids)})", tuple(pids)) if pids else [])}
     campaigns = {r["id"]: r["name"] for r in (await query_db(
@@ -1115,7 +1123,15 @@ async def _with_context(items: list[dict]) -> list[dict]:
 
     for item in items:
         p = people.get(item.get("prospect_id")) or {}
+        research = _json_or_none(p.get("research_json"))
+        review = _json_or_none(item.get("review_notes")) or {}
         item["context"] = {
+            "location": p.get("location", ""),
+            "research": research if isinstance(research, dict) else None,
+            "review": ({"verdict": item.get("review_verdict") or "",
+                        "fixed": review.get("fixed") or [],
+                        "issues": review.get("issues") or []}
+                       if item.get("review_verdict") else None),
             "campaign": campaigns.get(item.get("campaign_id"), ""),
             "company": p.get("company_name", ""),
             "website": p.get("website") or (f"https://{p['domain']}" if p.get("domain") else ""),

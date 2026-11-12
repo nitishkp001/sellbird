@@ -598,6 +598,15 @@ from sellbird.partnerships import SCHEMA as _PARTNERSHIP_SCHEMA
 
 MIGRATIONS.append(_PARTNERSHIP_SCHEMA)
 
+# Appended after the partnership schema, never before it: user_version counts
+# positions, and databases already past the partnership schema must still run this.
+MIGRATIONS.append("""
+    ALTER TABLE companies ADD COLUMN research_json TEXT DEFAULT '';
+    ALTER TABLE companies ADD COLUMN research_checked_at TIMESTAMP DEFAULT NULL;
+    ALTER TABLE outbox ADD COLUMN review_verdict TEXT DEFAULT '';
+    ALTER TABLE outbox ADD COLUMN review_notes TEXT DEFAULT '';
+""")
+
 
 class StateManager:
     def __init__(self, db_path: str | None = None):
@@ -766,6 +775,31 @@ class StateManager:
             ) as cursor:
                 row = await cursor.fetchone()
                 return self._company_from_row(row) if row else None
+
+    async def get_company_research(self, company_id: str) -> tuple[dict | None, str | None]:
+        """(brief, checked_at) for a company. The brief is None until researched."""
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT research_json, research_checked_at FROM companies WHERE id = ?",
+                (company_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if not row:
+            return None, None
+        try:
+            brief = json.loads(row[0]) if row[0] else None
+        except (json.JSONDecodeError, TypeError):
+            brief = None
+        return (brief if isinstance(brief, dict) else None), row[1]
+
+    async def set_company_research(self, company_id: str, brief: dict) -> None:
+        async with self._connect() as db:
+            await db.execute(
+                "UPDATE companies SET research_json = ?, research_checked_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                (json.dumps(brief, ensure_ascii=False), company_id),
+            )
+            await db.commit()
 
     async def get_company_by_domain(self, domain: str) -> Company | None:
         async with self._connect() as db:
@@ -1085,6 +1119,8 @@ class StateManager:
         in_reply_to: str = "",
         approved_by: str = "",
         mailbox_id: str = "",
+        review_verdict: str = "",
+        review_notes: str = "",
     ) -> str | None:
         """Queue one outgoing email. Returns its id, or None when the
         (campaign, prospect, step) slot already exists — the double-send guard.
@@ -1106,8 +1142,22 @@ class StateManager:
             )
             if cursor.rowcount > 0 and approved_by:
                 await db.execute("UPDATE outbox SET approved_by = ? WHERE id = ?", (approved_by, item_id))
+            if cursor.rowcount > 0 and (review_verdict or review_notes):
+                await db.execute(
+                    "UPDATE outbox SET review_verdict = ?, review_notes = ? WHERE id = ?",
+                    (review_verdict, review_notes, item_id))
             await db.commit()
             return item_id if cursor.rowcount > 0 else None
+
+    async def outbox_slot_exists(self, campaign_id: str, prospect_id: str, step: int) -> bool:
+        """True when this (campaign, prospect, step) email is already queued."""
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT 1 FROM outbox WHERE campaign_id = ? AND prospect_id = ? "
+                "AND step = ? AND kind = 'sequence' LIMIT 1",
+                (campaign_id, prospect_id, int(step)),
+            ) as cursor:
+                return await cursor.fetchone() is not None
 
     async def get_outbox(
         self,

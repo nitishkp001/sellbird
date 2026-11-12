@@ -672,10 +672,19 @@ class Sender:
         now = _utcnow()
         seen_emails: set[str] = set()
         window = send_window_of(self.config)
+        # writer.research / writer.review: email 1 must be the researched,
+        # reviewed draft. A prospect without one is never given the shared
+        # template in its place (the Writer retries them).
+        writer_cfg = getattr(self.config, "writer", None)
+        personal_required = bool(getattr(writer_cfg, "research", False)
+                                 or getattr(writer_cfg, "review", False))
 
         for prospect_id in campaign.prospect_ids:
             prospect = await self.state.get_prospect(prospect_id)
             if not prospect or not prospect.email:
+                continue
+            if personal_required and not await self.state.outbox_slot_exists(
+                    campaign.id, prospect.id, 1):
                 continue
             email = prospect.email.strip().lower()
             if not EMAIL_RE.match(email) or email in seen_emails:

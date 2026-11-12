@@ -14,7 +14,7 @@ import yaml
 from sellbird.textio import read_user_text
 from dotenv import load_dotenv
 from pydantic import (
-    BaseModel, PrivateAttr, TypeAdapter, ValidationError, field_validator, model_validator,
+    BaseModel, Field, PrivateAttr, TypeAdapter, ValidationError, field_validator, model_validator,
 )
 
 from sellbird.paths import PROJECT_ROOT
@@ -716,6 +716,16 @@ class WriterConfig(BaseModel):
     # The FACTS rule, the send gate and do-not-contact still apply. A file
     # that is set but can't be read stops writing until it's fixed.
     email_rules: str = ""
+    # Research each company before drafting: read its own site, boil it down
+    # to a short brief (what it does, where, specific details worth
+    # mentioning), and write email 1 from that. A company with nothing
+    # specific and checkable to say about it is not written to at all.
+    research: bool = False
+    # After drafting, a second brain call checks the email against the facts
+    # and your rules, and fixes it. The Outbox still gets every draft, with
+    # the verdict next to it: a person always makes the final call.
+    review: bool = False
+    review_rounds: int = Field(default=2, ge=1, le=4)
 
     @field_validator("email_rules", mode="before")
     @classmethod

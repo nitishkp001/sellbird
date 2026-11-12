@@ -16,9 +16,11 @@ from datetime import datetime, timezone
 
 from sellbird.brain import Brain
 from sellbird.config import EmailRulesError, SellbirdConfig, compliance_of, load_email_rules
+from sellbird.draft_review import notes_json, review_draft
 from sellbird.humanize import humanize, humanizer_enabled
 from sellbird.integrations.mail_provider import NATIVE_PROVIDERS
 from sellbird.models.campaign import Campaign, EmailStep
+from sellbird.research import brief_facts, research_company
 from sellbird.state import WRITABLE_EMAIL_STATUSES, StateManager
 from sellbird.sending_mode import sync_sending_mode
 from sellbird.startups import startup_facts
@@ -38,6 +40,9 @@ PERSON_VAR = re.compile(r"\{\{\s*(first_?name|last_?name|title)\s*\}\}", re.IGNO
 # Native mode: one Claude call per prospect for email 1, so batches stay
 # small — the rest of the 'new' pool is picked up on later cycles.
 NATIVE_BATCH_CAP = 8
+# Company research is one brain call per company: this many per cycle, three at a time.
+RESEARCH_PER_CYCLE = 8
+RESEARCH_PARALLEL = 3
 LEGACY_BATCH_CAP = 50
 
 # The built-in "how" lines each prompt ends with: email 1 is an observation
@@ -189,6 +194,14 @@ class Writer:
                 logger.info("Writer: No prospects at or above the minimum score.")
                 return
 
+        # writer.research: only companies with something specific to say about
+        # them are written to; the rest stay 'new' and are looked at again later.
+        if self.research_enabled:
+            prospects_with_email = await self._research_gate(prospects_with_email)
+            if not prospects_with_email:
+                logger.info("Writer: No prospects with usable company research yet.")
+                return
+
         # Batch prospects into campaign groups (by industry/title for relevance)
         batches = self._group_prospects(prospects_with_email)
 
@@ -253,6 +266,66 @@ class Writer:
                 f"{len(sequence)} emails for {len(prospects)} prospects."
             )
 
+    @property
+    def research_enabled(self) -> bool:
+        return bool(getattr(getattr(self.config, "writer", None), "research", False))
+
+    @property
+    def review_enabled(self) -> bool:
+        return bool(getattr(getattr(self.config, "writer", None), "review", False))
+
+    async def _research_gate(self, prospects: list) -> list:
+        """The prospects whose company has a usable research brief.
+
+        Briefs are saved per company, so this costs a brain call only the first
+        time (up to RESEARCH_PER_CYCLE companies a cycle). A company with no
+        record, or a brief with nothing specific in it, is left alone.
+        """
+        import asyncio
+
+        offer = getattr(getattr(self.config, "product", None), "description", "") or ""
+        companies: dict[str, object] = {}
+        for p in prospects:
+            if p.company_id and p.company_id not in companies:
+                companies[p.company_id] = await self.state.get_company(p.company_id)
+
+        from sellbird.research import _fresh
+        todo = []
+        for cid, company in companies.items():
+            if company is None:
+                continue
+            brief, checked_at = await self.state.get_company_research(cid)
+            if brief is None or not _fresh(checked_at):
+                todo.append(company)
+        todo = todo[:RESEARCH_PER_CYCLE]
+
+        if todo:
+            logger.info(f"Writer: Researching {len(todo)} company(ies) before drafting.")
+            gate = asyncio.Semaphore(RESEARCH_PARALLEL)
+
+            async def one(company):
+                async with gate:
+                    try:
+                        await research_company(self.brain, self.state, company, offer=offer)
+                    except Exception as e:
+                        logger.warning(f"Writer: research failed for {company.domain}: {e}")
+
+            await asyncio.gather(*(one(c) for c in todo))
+
+        kept, held = [], 0
+        for p in prospects:
+            brief, _ = (await self.state.get_company_research(p.company_id)
+                        if p.company_id else (None, None))
+            if brief and brief.get("usable"):
+                kept.append(p)
+            else:
+                held += 1
+        if held:
+            logger.info(
+                f"Writer: {held} prospect(s) held back: no usable research on their company yet "
+                "(unresearched, nothing specific to say, or a site that couldn't be read).")
+        return kept
+
     def _min_write_score(self) -> int:
         """channels.email.min_write_score, or 0 when the config has none."""
         email = getattr(getattr(self.config, "channels", None), "email", None)
@@ -309,24 +382,39 @@ class Writer:
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         provider = self.config.channels.email.provider
 
-        pending = []
+        personal_required = self.research_enabled or self.review_enabled
+        pending = []        # (prospect, draft, facts)
+        failed = []
         for prospect in prospects:
             try:
-                draft = await self._write_personal_email(prospect)
+                facts, inbox_rule = await self._gather_facts(prospect)
+                draft = await self._write_personal_email(
+                    prospect, facts=facts, inbox_rule=inbox_rule)
             except Exception as e:
                 logger.warning(f"Writer: personal draft failed for {prospect.email}: {e}")
-                continue
+                draft, facts = None, []
             if draft:
-                pending.append((prospect, draft))
+                pending.append((prospect, draft, facts))
+            else:
+                failed.append(prospect)
 
         # One Humanizer pass over the whole batch before anything is staged.
         polished = await humanize(
-            self.brain, [d for _, d in pending], agent="writer",
+            self.brain, [d for _, d, _ in pending], agent="writer",
             enabled=humanizer_enabled(self.config),
         )
 
+        # The reviewer has the last word on wording, so it reads what the
+        # Humanizer left. Whatever it concludes, a person still sees the draft.
+        rounds = int(getattr(self.config.writer, "review_rounds", 2) or 2) if self.review_enabled else 0
         drafted = 0
-        for (prospect, _), draft in zip(pending, polished):
+        for (prospect, _, facts), draft in zip(pending, polished):
+            verdict, notes = "", ""
+            if self.review_enabled:
+                draft, verdict, review = await review_draft(
+                    self.brain, draft, facts,
+                    rules=getattr(self, "email_rules", ""), rounds=rounds)
+                notes = notes_json(review)
             item_id = await self.state.add_outbox_item(
                 prospect_id=prospect.id,
                 campaign_id=campaign_id,
@@ -338,9 +426,19 @@ class Writer:
                 status=status,
                 provider=provider,
                 approved_by="" if require_approval else "autopilot",
+                review_verdict=verdict,
+                review_notes=notes,
             )
             if item_id:
                 drafted += 1
+
+        # With research or review on, a prospect without a personalized email 1
+        # is not sent the shared template instead: they go back to 'new' and
+        # are tried again (and given up on after a few failures).
+        if personal_required and failed:
+            for prospect in failed:
+                await self.state.update_prospect_status(prospect.id, "new")
+            await self._count_failed_attempt("personal drafts", failed)
 
         if drafted:
             logger.info(
@@ -378,13 +476,28 @@ class Writer:
             + lines
         )
 
-    async def _write_personal_email(self, prospect) -> dict | None:
-        """One grounded draft for one person. Facts in, one email out."""
+    async def _gather_facts(self, prospect) -> tuple[list[str], str]:
+        """What is known about this person and company, as FACTS lines, and the
+        extra rule for a company's general inbox ("" otherwise)."""
+        company = None
+        if prospect.company_id:
+            try:
+                company = await self.state.get_company(prospect.company_id)
+            except Exception:
+                company = None
+        brief = None
+        if company is not None and self.research_enabled:
+            brief, _ = await self.state.get_company_research(company.id)
+
+        # A scraped page title can stand in for the name ("Checking your
+        # browser"): the name the company gives itself on its pages wins.
+        company_name = (brief or {}).get("company_name") or prospect.company
+
         inbox_rule = ""
         if prospect.is_company_inbox:
             facts = [
                 f"- Name: unknown (the company's general inbox, {prospect.email})",
-                f"- Company: {prospect.company}",
+                f"- Company: {company_name}",
             ]
             inbox_rule = (
                 "\n- This goes to the company's general inbox, most likely read by the owner"
@@ -394,31 +507,38 @@ class Writer:
             facts = [
                 f"- Name: {prospect.full_name()}",
                 f"- Title: {prospect.title}",
-                f"- Company: {prospect.company}",
+                f"- Company: {company_name}",
             ]
         if prospect.industry:
             facts.append(f"- Industry: {prospect.industry}")
 
-        company = None
-        if prospect.company_id:
-            try:
-                company = await self.state.get_company(prospect.company_id)
-            except Exception:
-                company = None
         if company:
             if company.description:
                 facts.append(f"- What the company says about itself: {company.description}")
+            if company.location:
+                facts.append(f"- Location: {company.location}")
             if company.tech_stack:
                 facts.append(f"- Tools detected on their website: {', '.join(company.tech_stack[:6])}")
             for signal in company.signals[:3]:
                 facts.append(
                     f"- Signal ({signal.get('type', 'signal')}): {signal.get('detail', '')}"
                 )
+            if company.notes and not brief:
+                facts.append(f"- Our notes on the company: {company.notes[:800]}")
+        facts.extend(brief_facts(brief))
         if prospect.personalization_notes:
             facts.append(f"- Research notes: {prospect.personalization_notes}")
         startup = await self._startup(prospect.company_id)
         if startup is not None:
             facts.extend(startup)
+        return facts, inbox_rule
+
+    async def _write_personal_email(self, prospect, facts: list[str] | None = None,
+                                    inbox_rule: str = "") -> dict | None:
+        """One grounded draft for one person. Facts in, one email out."""
+        if facts is None:
+            facts, inbox_rule = await self._gather_facts(prospect)
+        startup = await self._startup(prospect.company_id)
 
         prompt = self.brain.load_prompt(
             "writer",

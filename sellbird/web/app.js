@@ -1720,6 +1720,27 @@ const CONTACT_SOURCES = {
 };
 
 // What the draft is built on, so every claim can be checked against it.
+// What the reviewing model made of the draft: fixed, still doubtful, or never checked.
+const REVIEW_LABELS = {
+  passed: ['t-good', 'Checked: no problems found'],
+  revised: ['t-good', 'Checked: fixed by the reviewer'],
+  flagged: ['t-bad', 'Checked: problems remain'],
+  unreviewed: ['', 'Not checked: the reviewer gave no answer'],
+};
+function renderDeskReview(ctx) {
+  const rv = ctx && ctx.review;
+  if (!rv || !rv.verdict) return '';
+  const [cls, label] = REVIEW_LABELS[rv.verdict] || ['', rv.verdict];
+  const items = (xs) => (xs || []).map(x => '<li>' + escHtml(x) + '</li>').join('');
+  return '<div class="desk-review">' +
+    '<div><span class="tag ' + cls + '">' + escHtml(label) + '</span></div>' +
+    (rv.issues && rv.issues.length
+      ? '<div class="k">Still open</div><ul>' + items(rv.issues) + '</ul>' : '') +
+    (rv.fixed && rv.fixed.length
+      ? '<div class="k">Fixed in the draft below</div><ul>' + items(rv.fixed) + '</ul>' : '') +
+  '</div>';
+}
+
 function renderDeskContext(ctx) {
   if (!ctx) return '';
   const row = (k, v) => v ? '<div class="k">' + k + '</div><div class="v">' + v + '</div>' : '';
@@ -1733,10 +1754,29 @@ function renderDeskContext(ctx) {
     .filter(Boolean).map(escHtml).join(' &middot; ');
   const signals = Object.entries(ctx.signals || {})
     .map(([k, v]) => escHtml(k) + ': <b>' + escHtml(v) + '</b>').join('<br>');
+  const r = ctx.research || null;
+  const list = (xs) => (xs || []).map(x => '<li>' + escHtml(x) + '</li>').join('');
+  const sources = r ? (r.sources || []).map(u => {
+    const h = safeHref(u);
+    return h ? '<a href="' + h + '" target="_blank" rel="noopener noreferrer">' +
+      escHtml(u.replace(/^https?:\/\/(www\.)?/i, '')) + '</a>' : '';
+  }).filter(Boolean).join(' &middot; ') : '';
+  const research = r ? (
+    row('What they do', escHtml(r.summary)) +
+    row('Sells', escHtml((r.offerings || []).join('; '))) +
+    row('Kind', escHtml((r.recipient_type || '').replace(/_/g, ' '))) +
+    row('Details found', r.hooks && r.hooks.length ? '<ul class="desk-list-v">' + list(r.hooks) + '</ul>' : '') +
+    row('Possible fit', r.software_fit && r.software_fit.toLowerCase() !== 'unclear'
+      ? escHtml(r.software_fit) + ' <span class="muted">(a judgement, not something they said)</span>' : '') +
+    row('Not known', escHtml((r.unknowns || []).join('; '))) +
+    row('Research', escHtml(r.confidence || '') + ' confidence' + (sources ? ' &middot; ' + sources : ''))
+  ) : '';
   return '<div class="desk-context">' +
     row('Company', escHtml(ctx.company)) +
     row('Website', site) +
+    row('Location', escHtml(ctx.location || (r && r.location) || '')) +
     row('About', escHtml(ctx.description)) +
+    research +
     row('Contact', who) +
     row('Found via', escHtml(Object.prototype.hasOwnProperty.call(CONTACT_SOURCES, ctx.contact_source)
       ? CONTACT_SOURCES[ctx.contact_source] : ctx.contact_source)) +
@@ -1912,6 +1952,7 @@ function renderDesk(items, i) {
         '<span class="tag">' + (cur.kind === 'reply' ? 'Reply' : 'Email ' + escHtml(String(cur.step))) + '</span>' +
         '<span class="muted">sends ' + formatDate(cur.send_at) + '</span></div>' +
       renderDeskContext(cur.context) +
+      renderDeskReview(cur.context) +
       (heldReason(cur)
         ? '<div class="banner wait desk-held">' + icon('alert') + '<div><b>Sellbird held this instead of sending it</b>' +
           '<div>' + escHtml(heldReason(cur)) + '. Read it before approving: text from a website or an ' +

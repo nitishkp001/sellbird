@@ -49,6 +49,14 @@ CREATE INDEX IF NOT EXISTS partnership_event_account ON partnership_events(accou
 '''
 STOP = {'replied', 'positive_reply', 'declined', 'do_not_contact', 'call_booked', 'brief_received'}
 EVENTS = {'linkedin_requested', 'linkedin_accepted', 'linkedin_declined', 'human_reply', 'positive_reply', 'call_booked', 'brief_received', 'do_not_contact', 'note'}
+# What the reviewer checks a partnership introduction against (see draft_review).
+PARTNERSHIP_REVIEW_RULES = (
+    "- An agency partnership introduction, 80 to 125 words, plain text, with a personal greeting and signature.\n"
+    "- One specific observation that matches the facts, one concrete component the sender could own, relevant proof from the sender details, and one short-call question.\n"
+    "- The agency keeps the client relationship and the pricing.\n"
+    "- Never invent projects, capacity, numbers, clients or skills gaps. No hype, flattery, em dashes, claims about attachments, or links that were not provided.\n"
+    "- No meeting days, dates or times."
+)
 EDITABLE = {'company', 'city', 'region', 'size_claimed', 'research_date', 'contact_route', 'target_person', 'target_role', 'target_profile', 'direct_email', 'business_inbox', 'stage', 'next_action', 'followup_date', 'partnership_angle', 'research_sources', 'research_notes', 'pdf_observation', 'pdf_proposal', 'pdf_pilot', 'email_subject', 'email_body', 'loom_url', 'video_script', 'company_type'}
 
 
@@ -344,6 +352,14 @@ class PartnershipStore:
         stopped = bool(prospect and prospect.status in {'replied','opted_out','lost','meeting','closed'}) or any(e['kind'] in STOP or e['kind']=='human_reply' for e in events) or record.get('stage','').strip().lower() in {'paused','declined','do not contact'}
         return {**raw,'record':record,'events':events,'assets':assets,'emails':emails,'email_verification':prospect.email_status if prospect else '', 'contact_status':prospect.status if prospect else '', 'stopped':stopped}
 
+    async def set_email_review(self, aid, review):
+        """Save the LLM review of the current draft. Not an editable field: only the server writes it."""
+        account = await self.account(aid)
+        record = {**account['record'],'email_review':review}
+        async with self.state._connect() as db:
+            await db.execute('UPDATE partnership_accounts SET record_json=?,updated_at=? WHERE id=?',(json.dumps(record),now(),aid))
+            await db.commit()
+
     async def update(self, aid, changes):
         account = await self.account(aid)
         if not isinstance(changes,dict) or set(changes)-EDITABLE:
@@ -371,6 +387,8 @@ class PartnershipStore:
             if clean.get(k) and not safe_url(clean[k]):
                 raise ValueError('Profile and video links must be HTTP(S) URLs.')
         record = {**account['record'],**clean}
+        if any(record.get(k)!=account['record'].get(k) for k in ('email_subject','email_body')):
+            record.pop('email_review',None)     # the LLM review described the old wording
         if record.get('direct_email') and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',record['direct_email']):
             raise ValueError('Enter a valid direct business email.')
         pid = account['prospect_id']
@@ -573,7 +591,8 @@ class PartnershipStore:
                 raise ValueError('An email is already queued.')
             await db.execute("INSERT OR IGNORE INTO campaigns (id,name,channel,status,prospect_ids_json) VALUES (?,?,'email','active',?)", (cid,'Partnership: '+r['company'],json.dumps([a['prospect_id']])))
             oid = uuid.uuid4().hex[:12]
-            await db.execute("INSERT INTO outbox (id,campaign_id,prospect_id,step,kind,to_email,subject,body,status,send_at) VALUES (?,?,?,?,'sequence',?,?,?,'pending_review',?)", (oid,cid,a['prospect_id'],step,prospect.email,r['email_subject'],r['email_body'],send_at))
+            review=r.get('email_review') if isinstance(r.get('email_review'),dict) else {}
+            await db.execute("INSERT INTO outbox (id,campaign_id,prospect_id,step,kind,to_email,subject,body,status,send_at,review_verdict,review_notes) VALUES (?,?,?,?,'sequence',?,?,?,'pending_review',?,?,?)", (oid,cid,a['prospect_id'],step,prospect.email,r['email_subject'],r['email_body'],send_at,review.get('verdict',''),json.dumps({k:review.get(k,[]) for k in ('fixed','issues')}) if review.get('verdict') else ''))
             await db.execute('INSERT INTO partnership_email_bindings VALUES (?,?,?,?)',(oid,aid,asset_id,asset_hash))
             await db.commit()
         return {'outbox_id':oid,'status':'pending_review'}
@@ -797,7 +816,19 @@ def build_router(get_state):
         if not isinstance(result,dict) or not isinstance(result.get('subject'),str) or not isinstance(result.get('body'),str):
             raise HTTPException(502,'The configured writer could not produce a draft. You can edit it manually.')
         refined=(await humanize(brain,[{'subject':result['subject'][:120],'body':result['body'][:4000]}],agent='writer',enabled=True))[0]
-        return await s.update(aid,{'email_subject':refined['subject'],'email_body':refined['body']})
+        review=None
+        if getattr(config.writer,'review',False):
+            from sellbird.draft_review import review_draft
+            facts=[f"- Recipient: {r.get('target_person','')} ({r.get('target_role','')})",f"- Company: {r['company']}",
+                   f"- Observation (sourced and entered by the sender): {r['pdf_observation']}",
+                   f"- Component the sender could own: {r['partnership_angle']}",
+                   f"- Sender details: {json.dumps(brand)}"]
+            refined,verdict,notes=await review_draft(brain,refined,facts,rules=PARTNERSHIP_REVIEW_RULES,rounds=config.writer.review_rounds)
+            review={'verdict':verdict,'fixed':notes['fixed'],'issues':notes['issues']}
+        saved=await s.update(aid,{'email_subject':refined['subject'],'email_body':refined['body']})
+        if review:
+            saved=await s.set_email_review(aid,review) or await s.account(aid)
+        return saved
 
     @router.post('/{aid}/video-script')
     async def video_script(aid:str):
