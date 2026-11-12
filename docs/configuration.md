@@ -14,10 +14,18 @@ product:      { name, description, pricing, key_benefits, objection_responses, o
 icp:          { industries, titles, company_size, geography, hiring_signals, geo_coordinates }
 channels:
   email:      { provider: gmail | microsoft | smtp | instantly, max_daily_sends, per_inbox_daily_cap,
-                require_approval, send_to_risky, min_write_score, max_bounce_rate, warmup, send_window, signature }
+                require_approval, send_to_risky, min_write_score, max_bounce_rate, follow_ups, warmup, send_window, signature }
 usage:        { max_daily_claude_percent, heartbeat_interval_minutes, quiet_hours }
 brain:        { provider: claude | codex, model, reasoning_effort }   # optional; claude by default
-writer:       { humanizer }   # optional; true adds one editing pass per batch using ~/.claude/skills/humanizer/SKILL.md
+writer:       { humanizer, site_facts, require_tip }   # optional; humanizer true adds one editing pass per batch using ~/.claude/skills/humanizer/SKILL.md
+              # site_facts (default true): the Writer sees what the free homepage signals found (no structured data,
+              # a stale or very small site, AI crawlers blocked) so an email can name one concrete thing to change.
+              # They come from an automated read of one page and can be wrong, so check a draft's claim
+              # against the site before approving it. false keeps them away from the Writer.
+              # require_tip (default false): true writes a first email only for a prospect with something concrete to
+              # build its one tip on (a site finding, a startup fact, a signal or the Scout's notes). The others are
+              # marked "no_tip" and skipped, instead of getting a draft that says it has no advice. The dashboard shows
+              # them as "Nothing to write about yet"; `sellbird retry-writes --no-tip` puts them back in line.
               # email_rules: your own markdown rules for the emails' shape (see The skills library)
 partnerships: { brief_kit, output_dir }   # optional; the design briefs are printed in, and the folder they are saved to (docs/partnerships.md)
 ```
@@ -25,6 +33,8 @@ partnerships: { brief_kit, output_dir }   # optional; the design briefs are prin
 `min_write_score` (0-100, default 0) is the lowest Scout fit score the writer
 drafts for: a prospect below it keeps its deliverable address but gets no
 sequence, so Claude calls and sends go to the best matches first.
+
+`follow_ups` (default true) set to `false` makes a campaign stage only its first email on Gmail, Microsoft and SMTP. Steps 2 and 3 are never prepared, so none can go out to someone who has not answered. A reply is still read, and the answer waits in the Outbox for you as usual. The Writer still drafts the whole sequence; the Sender just doesn't stage the later steps.
 
 `max_daily_claude_percent` caps whichever subscription `brain.provider` uses (the name predates Codex support).
 
@@ -48,6 +58,8 @@ sellbird companies             # company register → CSV: every company, fit, a
 sellbird sending pause|resume  # kill switch
 sellbird suppressions [add|remove <value>]  # addresses and domains never emailed
 sellbird inboxes list|connect|test|pause|resume|cap|name|remove|use  # several sending inboxes
+sellbird tray                  # menu-bar (macOS) / tray (Windows) icon; --status prints the state
+sellbird autostart install|uninstall|status  # start the tray at login
 sellbird mcp install [claude|codex]  # let your coding agent read Sellbird and pause sending
 sellbird warmup [domain]       # is the sending domain ready? (SPF/DKIM/DMARC, age, blocklists, warmup)
 sellbird trulyinbox connect    # connect TrulyInbox so Sellbird reads the mailbox's warmup
@@ -101,8 +113,28 @@ sellbird inboxes list                                           # each inbox and
 - Replies are read from every inbox each cycle. If one can't be read,
   nothing is sent that cycle, as with one inbox, and the Today page says
   which inbox.
+- The dashboard's **Inboxes** tab shows every inbox with today's cold sends
+  against its cap. Click one to pause, resume, cap, rename, check or remove
+  it. **Add inbox** connects one: Gmail and Microsoft 365 open their sign-in
+  in the browser on the computer running Sellbird (it needs the same
+  `GMAIL_CLIENT_ID`/`M365_CLIENT_ID` setup as the main mailbox), and an SMTP
+  password goes straight to your system keychain and is never shown again.
+  On a server with no browser, use `sellbird inboxes connect` instead.
+- Your coding agent can list inboxes and pause one (`inboxes_list`,
+  `inbox_pause`); only you resume one or change its cap.
 - An extension can add another way to connect an inbox with
   `registry.add_mailbox_connection` ([docs/extensions.md](extensions.md)).
+
+## The menu-bar app
+
+`sellbird tray` puts Sellbird in the macOS menu bar (the Windows tray). It
+starts the dashboard if it isn't running, then lets you start and stop
+Sellbird, pause and resume sending, and open the dashboard, already unlocked.
+Quitting the icon leaves Sellbird running. `sellbird autostart install` starts
+the icon when you log in: a LaunchAgent on macOS, a Startup-folder shortcut on
+Windows. It only ever touches its own entry, and refuses if something else is
+at that path. Linux has no tray: run `sellbird dashboard` and `sellbird run`
+as services instead.
 
 ## Your coding agent (MCP)
 
