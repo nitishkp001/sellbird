@@ -58,3 +58,7 @@ sellbird.yaml.*
 harvey.local.yaml
 harvey.local.yaml.*
 harvey.yaml.*
+
+# Local lead exports: real prospect data, never committed
+/leads.csv
+/prospects.csv
