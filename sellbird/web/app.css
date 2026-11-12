@@ -722,6 +722,13 @@ details[open] > summary::before { rotate: 45deg; }
 .desk-context .k { color: var(--text-3); }
 .desk-context .v { overflow-wrap: anywhere; }
 .desk-list-v { margin: 0; padding-left: 16px; }
+.desk-more { margin: 6px 0 10px; font-size: 13px; }
+.desk-more > summary { cursor: pointer; list-style: none; padding: 6px 0; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.desk-more > summary::-webkit-details-marker { display: none; }
+.desk-more > summary::before { content: ''; align-self: center; border-left: 5px solid var(--text-3); border-top: 4px solid transparent; border-bottom: 4px solid transparent; }
+.desk-more[open] > summary::before { transform: rotate(90deg); }
+.desk-gist { flex-basis: 100%; color: var(--text-2); padding-left: 16px; }
+.desk-more[open] .desk-gist { display: none; }
 .desk-review { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--border, rgba(127,127,127,.3)); border-radius: 8px; font-size: 13px; }
 .desk-review .k { color: var(--text-3); margin-top: 6px; }
 .desk-review ul { margin: 2px 0 0; padding-left: 18px; }

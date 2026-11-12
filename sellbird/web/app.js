@@ -1779,23 +1779,29 @@ function renderDeskContext(ctx) {
     row('Not known', escHtml((r.unknowns || []).join('; '))) +
     row('Research', escHtml(r.confidence || '') + ' confidence' + (sources ? ' &middot; ' + sources : ''))
   ) : '';
-  return '<div class="desk-context">' +
-    row('Company', escHtml(ctx.company)) +
+  const pdf = row('Reviewed PDF', ctx.partnership_asset ? 'Version ' + escHtml(ctx.partnership_asset.version) +
+    ' <button class="btn btn-ghost btn-sm" onclick="partnerAsset(' + jsq(ctx.partnership_asset.account_id) + ',' + jsq(ctx.partnership_asset.id) + ',\'pdf\')">Download attached version</button>' : '');
+  const core = row('Company', escHtml(ctx.company)) +
     row('Website', site) +
     row('Location', escHtml(ctx.location || (r && r.location) || '')) +
-    row('About', escHtml(ctx.description)) +
-    research +
     row('Contact', who) +
+    row('Email', email) +
+    pdf;
+  const more = row('About', escHtml(ctx.description)) +
+    research +
     row('Found via', escHtml(Object.prototype.hasOwnProperty.call(CONTACT_SOURCES, ctx.contact_source)
       ? CONTACT_SOURCES[ctx.contact_source] : ctx.contact_source)) +
-    row('Email', email) +
     row('Signals', signals) +
     row('Campaign', ctx.campaign ? escHtml(ctx.campaign) +
       ' <span class="muted">(how they were found, not a fact about them)</span>' : '') +
-    row('Writer notes', escHtml(ctx.notes)) +
-    row('Reviewed PDF', ctx.partnership_asset ? 'Version ' + escHtml(ctx.partnership_asset.version) +
-      ' <button class="btn btn-ghost btn-sm" onclick="partnerAsset(' + jsq(ctx.partnership_asset.account_id) + ',' + jsq(ctx.partnership_asset.id) + ',\'pdf\')">Download attached version</button>' : '') +
-  '</div>';
+    row('Writer notes', escHtml(ctx.notes));
+  // The facts behind the draft stay one click away; the draft itself sits right under the basics.
+  const gist = r && r.summary ? escHtml(r.summary.length > 110 ? r.summary.slice(0, 107) + '...' : r.summary) : '';
+  return '<div class="desk-context">' + core + '</div>' +
+    (more ? '<details class="desk-more"><summary><b>Company research</b>' +
+      (r ? ' <span class="muted">' + escHtml(r.confidence || '') + ' confidence</span>' : '') +
+      (gist ? '<span class="desk-gist">' + gist + '</span>' : '') + '</summary>' +
+      '<div class="desk-context">' + more + '</div></details>' : '');
 }
 
 // ── Approval or autopilot ──
@@ -2075,6 +2081,18 @@ async function sendingToggle(action) {
 
 const COMPANIES_PER_PAGE = 50;
 let _companiesPage = 0;
+// Direct outreach (the automated Writer and Outbox) vs partnership (agencies, written to one to one from Partnerships).
+const LEAD_KINDS = [['all', 'All'], ['direct', 'Direct'], ['partnership', 'Partnership']];
+let _companyKind = 'all';
+function kindMatches(item, kind) {
+  return kind === 'all' || (kind === 'partnership') === Boolean(item && item.partnership);
+}
+function kindButtons(kind, items, handler) {
+  return LEAD_KINDS.map(k =>
+    '<button class="' + (k[0] === kind ? 'on' : '') + '" aria-pressed="' + (k[0] === kind) + '" onclick="' + handler + '(\'' + k[0] + '\')">' +
+      k[1] + ' <span class="n">' + items.filter(i => kindMatches(i, k[0])).length + '</span></button>').join('');
+}
+function setCompanyKind(k) { _companyKind = k; renderCompaniesPage(0); }
 
 async function loadCompanies() {
   companyDrill = false;
@@ -2093,24 +2111,33 @@ async function loadCompanies() {
 
 function renderCompaniesPage(page) {
   const el = document.getElementById('companies-list');
-  const data = _companies;
+  // Each row keeps its index in the full list: showCompanyContacts reads _companies[i].
+  const data = _companies.map((c, i) => [c, i]).filter(([c]) => kindMatches(c, _companyKind));
   const pages = Math.max(1, Math.ceil(data.length / COMPANIES_PER_PAGE));
   _companiesPage = Math.min(Math.max(0, page), pages - 1);
   const start = _companiesPage * COMPANIES_PER_PAGE;
-  let html = '<div class="table-card"><table class="nowrap"><thead><tr><th>Company</th>' +
+  const kindBar = '<div class="toolbar" style="margin-bottom:10px"><div class="segmented" role="group" aria-label="Lead kind">' +
+    kindButtons(_companyKind, _companies, 'setCompanyKind') + '</div>' +
+    '<span class="muted" style="font-size:12px;margin-left:10px">Direct = cold outreach. Partnership = agencies, written to one to one from the Partnerships tab.</span></div>';
+  if (!data.length) {
+    el.innerHTML = kindBar + '<div class="table-card">' + emptyState(icon('companies'), 'No companies here',
+      'No ' + _companyKind + ' companies yet.') + '</div>';
+    return;
+  }
+  let html = kindBar + '<div class="table-card"><table class="nowrap"><thead><tr><th>Company</th>' +
     '<th title="Company fit, 0-100: sector, decision maker, reachability, buying signal. Hover a score for why.">Fit</th>' +
     '<th title="Hover a status for why the company was or wasn\'t contacted">Status</th>' +
     '<th>Industry</th><th>Location</th><th class="num">Contacts</th><th>Added</th></tr></thead><tbody>';
-  data.slice(start, start + COMPANIES_PER_PAGE).forEach((c, j) => {
-    const i = start + j;
+  data.slice(start, start + COMPANIES_PER_PAGE).forEach(([c, i]) => {
     const website = c.website || (c.domain ? 'https://' + c.domain : '');
     const domain = safeHref(website)
       ? '<a href="' + safeHref(website) + '" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">' +
         escHtml(c.domain || website.replace(/^https?:\/\//i, '')) + '</a>'
       : escHtml(c.domain);
     html += '<tr class="clickable" onclick="showCompanyContacts(' + i + ')">' +
-      '<td><div class="cell-stack"><span class="cell-main">' + escHtml(c.name) + '</span>' +
-        '<span class="cell-sub">' + domain + '</span></div></td>' +
+      '<td><div class="cell-stack"><span class="cell-main">' + escHtml(c.name) +
+        (c.partnership ? ' <span class="tag" title="Partnership account: written to one to one from Partnerships">Partnership</span>' : '') +
+        '</span><span class="cell-sub">' + domain + '</span></div></td>' +
       '<td title="' + escHtml((c.fit_reasons || []).join(' · ')) + '">' +
         (typeof c.fit === 'number' ? meterHtml(c.fit) : '') + '</td>' +
       '<td title="' + escHtml(c.register_why || '') + '">' + escHtml(c.register_status || '') + '</td>' +
@@ -2240,6 +2267,8 @@ function fbCampaign(i) {
 // Search and status filter live outside the table, so the 15-second refresh
 // re-renders rows without losing what you typed.
 let _contactQuery = '', _contactFilter = 'all', _contactSort = 'date_desc', _whyLeadId = null;
+let _contactKind = 'all';
+function setContactKind(k) { _contactKind = k; renderContacts(); }
 const CONTACT_FILTERS = [
   ['all', 'All', null],
   ['has_linkedin', 'With LinkedIn', null],
@@ -2367,6 +2396,7 @@ async function loadProspects() {
       '<label class="search" style="flex:1 1 200px;">' + icon('discover') +
         '<input class="form-input" id="contact-search" type="search" placeholder="Search name, company, email, title..." ' +
         'aria-label="Search contacts" oninput="_contactQuery=this.value;renderContacts()"></label>' +
+      '<div class="segmented" id="contact-kinds" role="group" aria-label="Lead kind"></div>' +
       '<div class="segmented" id="contact-filters" role="group" aria-label="Filter by status"></div>' +
       '<div style="display:inline-flex;align-items:center;gap:6px;margin-left:auto;">' +
         '<span style="font-size:12px;color:var(--text-2);white-space:nowrap;">Sort:</span>' +
@@ -2402,7 +2432,10 @@ function renderContacts() {
   const filtersEl = document.getElementById('contact-filters');
   if (!rowsEl) return;
   const q = _contactQuery.trim().toLowerCase();
-  const found = p => !q || [p.first_name, p.last_name, p.company, p.email, p.title].join(' ').toLowerCase().includes(q);
+  const matchesQuery = p => !q || [p.first_name, p.last_name, p.company, p.email, p.title].join(' ').toLowerCase().includes(q);
+  const found = p => matchesQuery(p) && kindMatches(p, _contactKind);
+  document.getElementById('contact-kinds').innerHTML =
+    kindButtons(_contactKind, _prospects.filter(matchesQuery), 'setContactKind');
   filtersEl.innerHTML = CONTACT_FILTERS.map(f =>
     '<button class="' + (f[0] === _contactFilter ? 'on' : '') + '" aria-pressed="' + (f[0] === _contactFilter) + '" onclick="setContactFilter(\'' + f[0] + '\')">' +
       f[1] + ' <span class="n">' + _prospects.filter(p => contactMatches(p, f[0]) && found(p)).length + '</span></button>'

@@ -747,6 +747,7 @@ async def get_companies():
         from sellbird.register import build_register
         register = {r["id"]: r for r in await build_register(query_db, load_config())}
         for c in rows:
+            c["partnership"] = bool(c.get("partnership_account_id"))
             r = register.get(c["id"])
             if r:
                 c["fit"], c["fit_reasons"] = r["fit"], r["fit_reasons"]
@@ -1193,7 +1194,14 @@ async def get_usage():
 
 @app.get("/api/prospects")
 async def get_prospects():
-    rows = await query_db("SELECT * FROM prospects ORDER BY created_at DESC LIMIT 200")
+    # partnership: written to one to one from Partnerships (their company is a
+    # partnership account); everyone else is direct outreach.
+    rows = await query_db(
+        "SELECT p.*, (p.status = 'partnership' OR (p.company_id != '' AND EXISTS ("
+        "SELECT 1 FROM partnership_accounts a WHERE a.company_id = p.company_id))) AS partnership "
+        "FROM prospects p ORDER BY p.created_at DESC LIMIT 200")
+    for r in rows:
+        r["partnership"] = bool(r.get("partnership"))
     # Someone whose opt-out was undone keeps a way to see what happened.
     undone = {r["pid"] for r in await query_db(
         "SELECT DISTINCT json_extract(details_json, '$.prospect_id') AS pid FROM actions "
