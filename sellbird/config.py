@@ -312,6 +312,10 @@ class EmailChannelConfig(BaseModel):
     # 3) are not prepared, so none can go out to someone who never answered;
     # a reply is still read and answered as usual. Gmail/Microsoft/SMTP only.
     follow_ups: bool = True
+    # true = every cold email gets a "pick a time" line with product.offer.booking_url
+    # above the postal address (added at send time, like the opt-out line). Needs a
+    # booking_url; the pre-send check already allows that link.
+    booking_link_in_footer: bool = False
     # New domain? Ramp cold email up slowly (see WarmupConfig). Native
     # providers only: Instantly has its own warmup and per-account limits.
     warmup: WarmupConfig = WarmupConfig()
@@ -639,10 +643,15 @@ def compliance_of(config) -> ComplianceConfig:
 
 
 def compliance_footer_lines(config) -> list[str]:
-    """The lines added under every cold email: address, then opt-out line."""
+    """The lines added under every cold email: the booking link (when switched on), the address, then the opt-out line."""
     compliance = compliance_of(config)
-    return [line for line in (compliance.postal_address.strip(),
-                              compliance.opt_out_line.strip()) if line]
+    lines = [compliance.postal_address.strip(), compliance.opt_out_line.strip()]
+    email = getattr(getattr(config, "channels", None), "email", None)
+    offer = getattr(getattr(config, "product", None), "offer", None)
+    url = str(getattr(offer, "booking_url", "") or "").strip()
+    if getattr(email, "booking_link_in_footer", False) is True and url.startswith("https://"):
+        lines.insert(0, f"Pick a time that suits you: {url}")
+    return [line for line in lines if line]
 
 
 def compliance_notice(config) -> str:
