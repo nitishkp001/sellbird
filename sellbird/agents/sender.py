@@ -734,6 +734,8 @@ class Sender:
                     status=initial_status,
                     provider=self.provider.name,
                     approved_by="" if require_approval else "autopilot",
+                    review_verdict=getattr(step, "review_verdict", ""),
+                    review_notes=getattr(step, "review_notes", ""),
                 )
                 if item_id:
                     staged += 1

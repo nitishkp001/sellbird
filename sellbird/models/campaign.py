@@ -16,6 +16,10 @@ class EmailStep(BaseModel):
     subject: str
     body: str
     delay_days: int = 0  # days after previous step
+    # The LLM review of this step (sellbird.draft_review), when writer.review is on:
+    # "passed" | "revised" | "flagged" | "unreviewed" and its notes as JSON.
+    review_verdict: str = ""
+    review_notes: str = ""
 
 
 class Campaign(BaseModel):

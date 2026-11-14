@@ -818,6 +818,49 @@ def cmd_retry_writes(args):
     asyncio.run(_run())
 
 
+def cmd_verify(args):
+    """Re-check addresses that were only guesses, with your configured verifier."""
+    from sellbird.config import load_env
+    from sellbird.reverify import candidates, reverify, verifier_configured
+    from sellbird.state import StateManager
+
+    async def _run():
+        env = load_env()
+        if not verifier_configured(env):
+            print("\n  No email verifier is configured. Add REOON_API_KEY (600 free checks a month),\n"
+                  "  ZEROBOUNCE_API_KEY or HUNTER_API_KEY to .env, then run this again.\n")
+            return 1
+        state = StateManager()
+        await state.init_db()
+        todo = await candidates(state, status=args.status,
+                                include_partnership=args.partnership, limit=args.limit)
+        label = f"'{args.status}' address(es)"
+        if not todo:
+            print(f"\n  Nothing to check: no {label} on people still in line for cold email.\n")
+            return 0
+        if args.dry_run:
+            print(f"\n  {len(todo)} {label} would be checked, about {len(todo)} verifier credit(s). "
+                  "Nothing was changed.\n")
+            return 0
+        print(f"\n  Checking {len(todo)} {label}...")
+        counts = await reverify(state, env, todo)
+        parts = [f"{counts[k]} {k}" for k in ("verified", "risky", "invalid", "guess", "error") if counts[k]]
+        print(f"  Checked {len(todo)}: " + ", ".join(parts) + ".")
+        usable = counts["verified"] + counts["risky"]
+        if usable:
+            print(f"  {usable} can now be written to"
+                  + ("" if counts["verified"] else " (catch-all addresses; they send only when "
+                     "channels.email.send_to_risky is on)") + ".")
+        if counts["guess"] or counts["error"]:
+            print("  The rest stay as they were: the verifier gave no firm answer, or its credit ran out.")
+        print()
+        return 0
+
+    code = asyncio.run(_run())
+    if code:
+        sys.exit(code)
+
+
 def cmd_warmup(args):
     """Check whether the sending domain is ready for cold email."""
     import os
@@ -1320,6 +1363,17 @@ def main():
     from sellbird import desktop_cli
     desktop_cli.register_desktop_commands(subparsers)
     desktop_cli.register(subparsers)
+
+    sub = subparsers.add_parser(
+        "verify", help="Re-check addresses that were only guesses, with your email verifier")
+    sub.add_argument("--status", choices=["guess", "risky"], default="guess",
+                     help="which addresses to re-check (default: guess; risky is worth a retry after "
+                          "adding a second verifier such as ZeroBounce)")
+    sub.add_argument("--limit", type=int, default=100, help="most addresses to check (default 100)")
+    sub.add_argument("--partnership", action="store_true",
+                     help="include contacts at partnership companies (left out by default)")
+    sub.add_argument("--dry-run", action="store_true", help="count what would be checked, then stop")
+    sub.set_defaults(func=cmd_verify)
 
     sub = subparsers.add_parser("suppressions", help="Addresses and domains Sellbird never emails")
     sub.add_argument("suppression_action", nargs="?", default="list", choices=["list", "add", "remove"])

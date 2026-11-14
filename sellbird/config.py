@@ -698,6 +698,10 @@ class QuietHoursConfig(BaseModel):
 class UsageConfig(BaseModel):
     max_daily_claude_percent: float = 80.0
     heartbeat_interval_minutes: int = 15
+    # The longest one cycle may run before its unfinished agents are cut off. Ten minutes
+    # suits a fast model; a slow one (Gemini through Antigravity can take minutes per
+    # call) needs more for the Writer's research and review to finish.
+    cycle_timeout_minutes: int = Field(default=10, ge=1, le=240)
     quiet_hours: QuietHoursConfig = QuietHoursConfig()
 
     @field_validator("max_daily_claude_percent")

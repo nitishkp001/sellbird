@@ -30,11 +30,19 @@ logger = logging.getLogger("sellbird.draft_review")
 MAX_GROWTH_WORDS = 20
 META_PREFIXES = ("i can't", "i cannot", "as an ai", "sorry,", "here is", "here's")
 LINK = re.compile(r"https?://|www\.", re.IGNORECASE)
+MERGE_VAR = re.compile(r"\{\{\s*\w+\s*\}\}")
 
 DEFAULT_RULES = """- Plain text, no formatting. No em dashes, no exclamation marks, at most one question.
 - Email 1 under 75 words. Do not start with "I" or "We". No links.
 - No hype or filler: "game-changer", "unlock", "leverage", "I'd love to", "just wanted to", "hope you're well".
 - Do not offer free anything, guarantees, discounts or invented prices."""
+
+
+FOLLOW_UP_RULES = """- Plain text, no formatting. No em dashes, no exclamation marks, at most one question.
+- Email 2 is under 75 words and takes a new angle. Email 3 is under 40 words and is a short, gracious last note.
+- Never pretend a conversation happened, and never guilt-trip ("just following up", "bumping this").
+- No links. No hype or filler. No free anything, guarantees, discounts or invented prices.
+- A proof point may only be something the FACTS state. No invented customers, results, numbers or case studies."""
 
 
 def _words(text: str) -> int:
@@ -53,14 +61,29 @@ def acceptable_revision(original: dict, revised) -> bool:
         return False
     if "—" in subject + body:
         return False
+    # Merge variables are placeholders filled in per recipient: a fix may not drop or invent one.
+    if sorted(MERGE_VAR.findall(original["subject"] + original["body"])) != sorted(MERGE_VAR.findall(subject + body)):
+        return False
     if LINK.search(subject + body) and not LINK.search(original["subject"] + original["body"]):
         return False
     return _words(body) <= _words(original["body"]) + MAX_GROWTH_WORDS
 
 
-def _prompt(draft: dict, facts: list[str], rules: str) -> str:
+def _prompt(draft: dict, facts: list[str], rules: str, kind: str = "first", step: int = 1) -> str:
+    if kind == "follow_up":
+        about = (f"This is follow-up email {step} of a cold sequence. The same text goes to many "
+                 "recipients, so anything like {{first_name}} or {{company}} is a placeholder: leave "
+                 "every placeholder exactly as written, and do not state anything specific about one "
+                 "recipient.")
+        fit = ("3. FIT: does it take a fresh angle (email 2) or close gracefully (email 3), without\n"
+               "   pretending a conversation happened, and without invented proof (customers, results,\n"
+               "   numbers, case studies that the FACTS do not state)?")
+    else:
+        about = "You are checking ONE first email to one person."
+        fit = ("3. FIT: is it framed for the kind of company this is (an agency is offered overflow capacity,\n"
+               "   not sold development), and does it open with something specific rather than a template line?")
     return f"""You are the reviewer for a cold email before a person reads it. Be strict and
-specific. You are checking ONE draft.
+specific. {about}
 
 FACTS: everything that is known about the recipient and their company. The email may state
 only what these support:
@@ -81,8 +104,7 @@ Check, in this order:
    An invented, stretched or flattering claim is an issue.
 2. RULES: does it break any rule above (times, dates, links, length, more than one question,
    banned phrases, wrong sign-off)?
-3. FIT: is it framed for the kind of company this is (an agency is offered overflow capacity,
-   not sold development), and does it open with something specific rather than a template line?
+{fit}
 4. VOICE: does it read like one person typed it? Flag flattery, stacked buzzwords and
    "not X but Y" constructions.
 
@@ -109,7 +131,7 @@ def _parse(result) -> tuple[str, list[str], dict | None] | None:
 
 
 async def review_draft(brain, draft: dict, facts: list[str], *, rules: str = "",
-                       rounds: int = 2) -> tuple[dict, str, dict]:
+                       rounds: int = 2, kind: str = "first", step: int = 1) -> tuple[dict, str, dict]:
     """Review ``draft`` ({"subject", "body"}). Returns (final draft, verdict, notes)
     where notes is {"fixed": [...], "issues": [...], "rounds": n}."""
     current = dict(draft)
@@ -120,7 +142,8 @@ async def review_draft(brain, draft: dict, facts: list[str], *, rules: str = "",
     for _ in range(max(1, rounds)):
         try:
             parsed = _parse(await brain.think_json(
-                _prompt(current, facts, rules.strip() or DEFAULT_RULES),
+                _prompt(current, facts, rules.strip() or (FOLLOW_UP_RULES if kind == "follow_up" else DEFAULT_RULES),
+                        kind, step),
                 session_id="sellbird-review", agent="reviewer", task="draft_review"))
         except Exception as e:                       # a review failing must never lose the draft
             logger.warning(f"Review: call failed: {e}")

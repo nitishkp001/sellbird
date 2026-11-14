@@ -55,7 +55,9 @@ ERROR_BACKOFF_CAP = 900
 # heartbeat loop down silently with it. This is the only thing standing
 # between one stuck agent and Sellbird freezing for hours with no agent
 # knowing it's dead — found in production after exactly that happened.
-CYCLE_TIMEOUT_SECONDS = 600
+CYCLE_TIMEOUT_SECONDS = 600          # default; usage.cycle_timeout_minutes replaces it
+DEFAULT_CYCLE_TIMEOUT_SECONDS = CYCLE_TIMEOUT_SECONDS
+CONFIGURED_CYCLE_TIMEOUT_SECONDS: float | None = None
 
 # Cap on a single quiet-hours sleep chunk. See the quiet-hours block in
 # heartbeat() for why this exists — a system sleep/wake cycle during one
@@ -203,6 +205,14 @@ async def decide_next_action(
     return action
 
 
+def _cycle_limit() -> float:
+    """The configured cycle limit, unless CYCLE_TIMEOUT_SECONDS was set to something else
+    (a test or a caller overriding it), which wins."""
+    if CYCLE_TIMEOUT_SECONDS != DEFAULT_CYCLE_TIMEOUT_SECONDS:
+        return CYCLE_TIMEOUT_SECONDS
+    return CONFIGURED_CYCLE_TIMEOUT_SECONDS or CYCLE_TIMEOUT_SECONDS
+
+
 async def _run_agents(tasks: list) -> dict:
     """Run (name, coroutine) pairs in parallel; return {name: outcome}.
 
@@ -215,25 +225,39 @@ async def _run_agents(tasks: list) -> dict:
         return {}
     if len(tasks) > 1:
         logger.info(f"Running {len(tasks)} agents in parallel: {[t[0] for t in tasks]}")
+    limit = _cycle_limit()
+    futures = [asyncio.ensure_future(t[1]) for t in tasks]
     try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*[t[1] for t in tasks], return_exceptions=True),
-            timeout=CYCLE_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
+        done, pending = await asyncio.wait(futures, timeout=limit)
+    except asyncio.CancelledError:          # shutting down: leave nothing running behind us
+        for f in futures:
+            f.cancel()
+        await asyncio.gather(*futures, return_exceptions=True)
+        raise
+    if pending:
+        # Only the agents still running are cut off. One that already finished (the reply
+        # check takes seconds) keeps its outcome, so a slow Writer can't make Sellbird
+        # think replies were never read and hold every send.
         logger.error(
-            f"Cycle timed out after {CYCLE_TIMEOUT_SECONDS}s with "
-            f"{[t[0] for t in tasks]} still running — cancelled, "
-            "moving on to the next heartbeat instead of hanging forever."
+            f"Cycle timed out after {limit}s with "
+            f"{[t[0] for t, f in zip(tasks, futures) if f in pending]} still running — "
+            "cancelled, moving on to the next heartbeat instead of hanging forever."
         )
-        results = []
+        for f in pending:
+            f.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
     outcomes = {}
-    for (name, _), result in zip(tasks, results):
-        if isinstance(result, asyncio.CancelledError):
-            raise result
-        if isinstance(result, Exception):
-            logger.error(f"Agent {name} failed: {result}", exc_info=result)
-        outcomes[name] = result
+    for (name, _), future in zip(tasks, futures):
+        if future in pending:
+            continue                        # cut off: it has no outcome
+        if future.cancelled():
+            raise asyncio.CancelledError()
+        error = future.exception()
+        if error is not None:
+            logger.error(f"Agent {name} failed: {error}", exc_info=error)
+            outcomes[name] = error
+        else:
+            outcomes[name] = future.result()
     return outcomes
 
 
@@ -318,6 +342,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     handler = Handler(brain, state, config, env)
     analyst = Analyst(state)
 
+    global CONFIGURED_CYCLE_TIMEOUT_SECONDS
+    CONFIGURED_CYCLE_TIMEOUT_SECONDS = config.usage.cycle_timeout_minutes * 60
     interval = config.usage.heartbeat_interval_minutes * 60
     max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
     consecutive_errors = 0

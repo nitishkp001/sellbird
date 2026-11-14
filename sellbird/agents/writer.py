@@ -340,10 +340,13 @@ class Writer:
             )
             campaign_id = await self.state.add_campaign(campaign)
 
-            # Mark prospects so they aren't picked up again
-            for p in prospects:
-                await self.state.queue_prospect_if_unsent(p.id)
-                await self.state.delete_setting(WRITE_ATTEMPTS_KEY + p.id)
+            # Mark prospects so they aren't picked up again. With research or review on,
+            # each prospect is marked as their own draft is saved, so one cut off by a slow
+            # cycle stays in line instead of being stranded without an email.
+            if not (self.is_native and (self.research_enabled or self.review_enabled)):
+                for p in prospects:
+                    await self.state.queue_prospect_if_unsent(p.id)
+                    await self.state.delete_setting(WRITE_ATTEMPTS_KEY + p.id)
 
             # Native providers: replace the shared template for email 1 with
             # a per-prospect draft grounded in that company's actual facts.
@@ -514,8 +517,11 @@ class Writer:
         provider = self.config.channels.email.provider
 
         personal_required = self.research_enabled or self.review_enabled
-        pending = []        # (prospect, draft, facts)
+        rounds = int(getattr(self.config.writer, "review_rounds", 2) or 2) if self.review_enabled else 0
         failed = []
+        drafted = 0
+        # One prospect at a time, start to finish, and each saved as soon as it is done: a cycle
+        # that is cut short (the model is slow) keeps everything already finished.
         for prospect in prospects:
             try:
                 facts, inbox_rule = await self._gather_facts(prospect)
@@ -524,22 +530,13 @@ class Writer:
             except Exception as e:
                 logger.warning(f"Writer: personal draft failed for {prospect.email}: {e}")
                 draft, facts = None, []
-            if draft:
-                pending.append((prospect, draft, facts))
-            else:
+            if not draft:
                 failed.append(prospect)
-
-        # One Humanizer pass over the whole batch before anything is staged.
-        polished = await humanize(
-            self.brain, [d for _, d, _ in pending], agent="writer",
-            enabled=humanizer_enabled(self.config),
-        )
-
-        # The reviewer has the last word on wording, so it reads what the
-        # Humanizer left. Whatever it concludes, a person still sees the draft.
-        rounds = int(getattr(self.config.writer, "review_rounds", 2) or 2) if self.review_enabled else 0
-        drafted = 0
-        for (prospect, _, facts), draft in zip(pending, polished):
+                continue
+            draft = (await humanize(
+                self.brain, [draft], agent="writer", enabled=humanizer_enabled(self.config)))[0]
+            # The reviewer reads what the Humanizer left. Whatever it concludes, a person
+            # still sees the draft.
             verdict, notes = "", ""
             if self.review_enabled:
                 draft, verdict, review = await review_draft(
@@ -567,6 +564,9 @@ class Writer:
             )
             if item_id:
                 drafted += 1
+                if personal_required:
+                    await self.state.queue_prospect_if_unsent(prospect.id)
+                    await self.state.delete_setting(WRITE_ATTEMPTS_KEY + prospect.id)
 
         # With research or review on, a prospect without a personalized email 1
         # is not sent the shared template instead: they go back to 'new' and
@@ -872,7 +872,15 @@ Return ONLY a JSON array (no markdown fences, no commentary):
             agent="writer", enabled=humanizer_enabled(self.config),
         )
         names = [n for p in prospects for n in _names(p)]
+        rounds = int(getattr(self.config.writer, "review_rounds", 2) or 2) if self.review_enabled else 0
         for step, draft in zip(steps, polished):
+            # writer.review: follow-ups are checked too, once for the whole batch (they are one
+            # template with merge variables). Email 1 is reviewed per person, in the Outbox flow.
+            if self.review_enabled and step.step > 1:
+                draft, step.review_verdict, review = await review_draft(
+                    self.brain, draft, self._sequence_facts(), kind="follow_up", step=step.step,
+                    rules=getattr(self, "email_rules", ""), rounds=rounds)
+                step.review_notes = notes_json(review)
             kept = await self._keep_to_rules(draft, step=step.step, names=names)
             if kept is None:
                 # One template goes to the whole batch: a step that can't be
@@ -881,6 +889,18 @@ Return ONLY a JSON array (no markdown fences, no commentary):
                 return []
             step.subject, step.body = kept["subject"], kept["body"]
         return steps
+
+    def _sequence_facts(self) -> list[str]:
+        """What a follow-up template may rely on: the sender and the offer, nothing about any one recipient."""
+        product, persona = self.config.product, self.config.persona
+        facts = [f"- Sender: {persona.name}, {persona.role} at {persona.company}",
+                 f"- What the sender offers: {product.description}"]
+        if product.key_benefits:
+            facts.append("- Benefits the sender may mention: " + "; ".join(product.key_benefits))
+        if product.pricing:
+            facts.append(f"- Pricing: {product.pricing}")
+        facts.append("- The same text goes to many recipients: nothing specific about any one of them is known here.")
+        return facts
 
     async def _keep_to_rules(self, draft: dict, *, step: int, names=()) -> dict | None:
         """``draft`` tidied, signed and within Sellbird's writing rules
