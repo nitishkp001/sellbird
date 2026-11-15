@@ -1092,10 +1092,11 @@ def _email_section(data):
     return email if isinstance(email, dict) else None
 
 
-def _with_approval_line(raw: str, word: str) -> list[str]:
-    """Ways to say require_approval: <word> in ``raw``: change the line that
-    is there, or add one under an ``email:`` key."""
-    out = [raw[:m.start("val")] + word + raw[m.end("val"):] for m in _APPROVAL_LINE_RE.finditer(raw)]
+def _with_email_line(raw: str, key: str, word: str) -> list[str]:
+    """Ways to say ``<key>: <word>`` in ``raw``: change the line that is
+    there, or add one under an ``email:`` key."""
+    line_re = re.compile(rf"^(?P<lead>[ \t]*{re.escape(key)}[ \t]*:[ \t]*)(?P<val>[^\s#]+)", re.MULTILINE)
+    out = [raw[:m.start("val")] + word + raw[m.end("val"):] for m in line_re.finditer(raw)]
     for m in _EMAIL_KEY_RE.finditer(raw):
         child = m.group("ind") + "  "
         for line in raw[m.end():].split("\n")[1:]:
@@ -1105,12 +1106,16 @@ def _with_approval_line(raw: str, word: str) -> list[str]:
             if len(indent) > len(m.group("ind")):
                 child = indent
             break
-        out.append(raw[:m.end()] + f"\n{child}require_approval: {word}" + raw[m.end():])
+        out.append(raw[:m.end()] + f"\n{child}{key}: {word}" + raw[m.end():])
     return out
 
 
-def set_require_approval(value: bool, path=None) -> Path:
-    """Write channels.email.require_approval into the config file Sellbird
+def _with_approval_line(raw: str, word: str) -> list[str]:
+    return _with_email_line(raw, "require_approval", word)
+
+
+def _set_email_value(key: str, value, word: str, path=None) -> Path:
+    """Write channels.email.<key> into the config file Sellbird
     reads (sellbird.local.yaml wins, as in load_config). Only that value
     changes: the result must parse to the same settings apart from it, or
     nothing is written and ConfigError says to set it by hand."""
@@ -1124,18 +1129,17 @@ def set_require_approval(value: bool, path=None) -> Path:
         raw = data_bytes.decode("utf-8-sig").replace("\r\n", "\n")
     except UnicodeDecodeError:
         raise ConfigError(f"{path.name} isn't UTF-8, so it isn't rewritten. Set "
-                          f"channels.email.require_approval there by hand.")
+                          f"channels.email.{key} there by hand.")
     try:
         data = yaml.safe_load(raw)
     except yaml.YAMLError as e:
         raise ConfigError(f"Invalid YAML in {path.name}: {e}")
     if _email_section(data) is None:
         raise ConfigError(f"{path.name} has no channels.email section. Set "
-                          f"channels.email.require_approval there by hand.")
+                          f"channels.email.{key} there by hand.")
     expected = copy.deepcopy(data)
-    _email_section(expected)["require_approval"] = bool(value)
-    word = "true" if value else "false"
-    for new in _with_approval_line(raw, word):
+    _email_section(expected)[key] = value
+    for new in _with_email_line(raw, key, word):
         try:
             if yaml.safe_load(new) != expected:
                 continue
@@ -1153,20 +1157,37 @@ def set_require_approval(value: bool, path=None) -> Path:
             tmp.unlink(missing_ok=True)
         _mode_cache.pop(str(target), None)
         return path
-    raise ConfigError(f"Couldn't change require_approval in {path.name} safely. "
-                      f"Set channels.email.require_approval: {word} there by hand.")
+    raise ConfigError(f"Couldn't change {key} in {path.name} safely. "
+                      f"Set channels.email.{key}: {word} there by hand.")
+
+
+def set_require_approval(value: bool, path=None) -> Path:
+    """Write channels.email.require_approval (see _set_email_value)."""
+    return _set_email_value("require_approval", bool(value), "true" if value else "false", path)
+
+
+MAX_DAILY_SENDS_LIMIT = 500
+
+
+def set_max_daily_sends(value: int, path=None) -> Path:
+    """Write channels.email.max_daily_sends into the config file Sellbird
+    reads, changing only that line."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_DAILY_SENDS_LIMIT:
+        raise ConfigError(f"The daily limit must be a whole number from 0 to {MAX_DAILY_SENDS_LIMIT}.")
+    return _set_email_value("max_daily_sends", value, str(value), path)
 
 
 _mode_cache: dict[str, tuple[tuple, object]] = {}
 
 
 def refresh_sending_mode(config, path=None) -> bool:
-    """Bring a running config's require_approval in line with the file it was
-    loaded from, so a switch made while Sellbird runs counts at once: the
-    sender, writer and handler call this before they queue or send. Cheap:
-    the file is only read again when it changed. True when the value
-    changed. A config not loaded from a file, or a file that can't be read,
-    leaves the running value alone."""
+    """Bring a running config's live email settings (LIVE_EMAIL_SETTINGS:
+    require_approval, max_daily_sends) in line with the file it was loaded
+    from, so a switch made while Sellbird runs counts at once: the sender,
+    writer and handler call this before they queue or send. Cheap: the file
+    is only read again when it changed. True when require_approval changed
+    (the other settings apply silently). A config not loaded from a file, or
+    a file that can't be read, leaves the running values alone."""
     path = path or getattr(config, "_source_path", None)
     if not path:
         return False
@@ -1177,22 +1198,54 @@ def refresh_sending_mode(config, path=None) -> bool:
         stamp = (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
         cached = _mode_cache.get(str(target))
         if cached and cached[0] == stamp:
-            value = cached[1]
+            live = cached[1]
         else:
-            email = _email_section(yaml.safe_load(read_user_text(target)))
-            value = email.get("require_approval", True) if email is not None else None
-            try:
-                # Read the way load_config reads it: "true", 'no', on...
-                value = TypeAdapter(bool).validate_python(value)
-            except ValidationError:
-                value = None
-            _mode_cache[str(target)] = (stamp, value)
+            live = _live_email_values(_email_section(yaml.safe_load(read_user_text(target))))
+            _mode_cache[str(target)] = (stamp, live)
     except Exception:
         return False
-    if not isinstance(value, bool) or value == config.channels.email.require_approval:
-        return False
-    config.channels.email.require_approval = value
-    return True
+    email = config.channels.email
+    changed = False
+    for name, value in live.items():
+        if value != getattr(email, name):
+            setattr(email, name, value)
+            changed = changed or name == "require_approval"
+    return changed
+
+
+# channels.email settings the dashboard changes while Sellbird runs, so a running
+# Sellbird follows the file for them at once (refresh_sending_mode): the name, how
+# load_config would read it, and what a missing key means (None: keep the running
+# value). A value that doesn't read leaves the running one alone. Add a setting here,
+# not a special case in refresh_sending_mode.
+def _non_negative_int(value):
+    if isinstance(value, bool):
+        raise ValueError("not a number")
+    value = TypeAdapter(int).validate_python(value)
+    if value < 0:
+        raise ValueError("negative")
+    return value
+
+
+LIVE_EMAIL_SETTINGS = (
+    ("require_approval", TypeAdapter(bool).validate_python, True),   # "true", 'no', on...
+    ("max_daily_sends", _non_negative_int, None),
+)
+
+
+def _live_email_values(email) -> dict:
+    out = {}
+    if email is None:
+        return out
+    for name, read, missing in LIVE_EMAIL_SETTINGS:
+        raw = email.get(name, missing)
+        if raw is None:
+            continue
+        try:
+            out[name] = read(raw)
+        except (ValidationError, ValueError, TypeError):
+            pass
+    return out
 
 
 _dnc_cache: dict[str, tuple[tuple, list[str] | None]] = {}

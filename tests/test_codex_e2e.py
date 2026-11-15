@@ -819,3 +819,27 @@ async def test_a_message_that_fails_to_process_holds_that_cycles_sends(sellbird,
     await sellbird.run_cycles(2, between={1: after_first})
     assert seen["sent"] == []
     assert [m["to"] for m in sellbird.mail.sent] == ["bob@beta.com"]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_writer_does_not_hold_up_approved_email(sellbird, monkeypatch):
+    """Replies are read, then due approved email goes out, and only then the
+    slow work (here a Writer that never finishes) runs: an approved email is
+    sent in the cycle it is due, not after the Writer is cut off."""
+    import sellbird.agents.writer as writer_mod
+    await sellbird.state.init_db()
+    await _approved_item(sellbird.state)
+    sent_when_writer_started = {}
+
+    async def slow_writer(_self):
+        sent_when_writer_started["sent"] = list(sellbird.mail.sent)
+        await asyncio.sleep(30)
+
+    async def decide(*a, **k):
+        return "write_campaign"
+
+    monkeypatch.setattr(writer_mod.Writer, "run", slow_writer)
+    monkeypatch.setattr(main_mod, "decide_next_action", decide)
+    monkeypatch.setattr(main_mod, "CYCLE_TIMEOUT_SECONDS", 0.5)
+    await sellbird.run_cycles(1)
+    assert [m["to"] for m in sent_when_writer_started["sent"]] == ["bob@beta.com"]

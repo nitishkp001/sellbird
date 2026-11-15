@@ -1861,7 +1861,36 @@ function sendingModeCard(m) {
     html += '<div class="convo-actions"><button class="btn btn-secondary btn-sm" ' +
       'onclick="_autopilotArmed=true;renderSendingModeCard()">Turn on autopilot…</button></div>';
   }
-  return html + '</div>';
+  return html + sendLimitBlock(m) + '</div>';
+}
+
+// ── Daily send limit ──
+// The most cold emails Sellbird sends a day (channels.email.max_daily_sends).
+// A running Sellbird picks the new number up at its next check.
+function sendLimitBlock(m) {
+  if (m.max_daily_sends === undefined) return '';
+  const risky = !m.warmup_ramp;
+  return '<div class="convo-actions send-limit"><span><b>Daily send limit</b>: ' +
+      '<span class="muted">every email Sellbird sends in a day counts toward it, replies included. ' +
+      (risky ? 'Your mailbox has no warmup ramp, so going well above 10 a day raises the chance of landing in spam.' : 'Your warmup ramp keeps today’s cold emails lower while the mailbox is new; replies aren’t held back by the ramp.') +
+      '</span></span>' +
+    '<input class="form-input" id="send-limit-input" type="number" min="0" max="500" step="1" style="width:6rem" ' +
+      'value="' + Number(m.max_daily_sends) + '" aria-label="Daily send limit" ' +
+      'onkeydown="if (event.key === \'Enter\') saveSendLimit()">' +
+    '<button class="btn btn-primary btn-sm" onclick="saveSendLimit()">Save limit</button></div>';
+}
+
+async function saveSendLimit() {
+  const input = document.getElementById('send-limit-input');
+  const limit = input ? parseInt(input.value, 10) : NaN;
+  if (!Number.isInteger(limit) || limit < 0 || limit > 500) { showToast('Enter a whole number from 0 to 500.', 'error'); return; }
+  if (limit > 10 && _sendingMode && !_sendingMode.warmup_ramp &&
+      !confirm('Send up to ' + limit + ' cold emails a day?\n\nThis mailbox has no warmup ramp. More than about 10 a day from a new mailbox raises the chance of landing in spam.')) return;
+  const res = await api('/api/send-limit', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({limit}),
+  });
+  if (res && res.success) { showToast('Daily limit is ' + res.limit + '. Sellbird uses it from its next check.', 'success'); loadSendingModeCard(); }
+  else showToast((res && (res.message || res.error)) || 'Couldn’t save the limit.', 'error');
 }
 
 function renderSendingModeCard() {

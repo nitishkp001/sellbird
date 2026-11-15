@@ -446,9 +446,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             elif action == "idle":
                 tasks.append(("analyze", analyst.run()))
 
-            # Sending happens in a second phase, after every agent above has
-            # finished: the handler's stop-on-reply must cancel follow-ups to
-            # people who just replied before anything is sent. Native mail
+            # Sending happens after the reply readers have finished (see the
+            # phases below): the handler's stop-on-reply must cancel follow-ups
+            # to people who just replied before anything is sent. Native mail
             # providers drain the outbox every cycle, so their mailbox is
             # read every cycle too; any provider is read while a conversation
             # is open.
@@ -467,15 +467,18 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             if summary.get("unprofiled", 0):
                 tasks.append(("profile", run_profile_stage(state, limit=25, config=config)))
 
-            outcomes = await _run_agents(tasks)
+            # Phase 1: read replies. Phase 2: send. Phase 3: everything else.
+            # Stop-on-reply must cancel follow-ups to people who just replied
+            # before anything is sent, so the readers still go first. The slow
+            # work (the Writer, the Scout: model calls that can take minutes
+            # each) runs after sending, so emails you approved go out on time
+            # instead of waiting for a draft that's still being written.
+            readers = [t for t in tasks if t[0] in REPLY_READERS]
+            others = [t for t in tasks if t[0] not in REPLY_READERS]
+            outcomes = await _run_agents(readers)
 
-            # Phase 2: send — only after every reply-reading task this cycle
-            # finished reading and handling replies (it returns True; a
-            # failure, exception or timeout doesn't), and only if the brain
-            # didn't stop being usable meanwhile. Otherwise a reply may be
-            # unread, so its stop-on-reply hasn't run: queued emails wait.
             if send_tasks:
-                unread = [n for n, _ in tasks
+                unread = [n for n, _ in readers
                           if n in REPLY_READERS and outcomes.get(n) is not True]
                 paused = brain.paused_reason
                 if paused or unread:
@@ -490,6 +493,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 else:
                     await record_send_phase(state, send_hold_reason([], "", ""))
                     await _run_agents([(name, run()) for name, run in send_tasks])
+
+            outcomes.update(await _run_agents(others))
 
             # 6. Log the action (best-effort; never kills the loop)
             try:

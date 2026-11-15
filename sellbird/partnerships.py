@@ -15,6 +15,7 @@ import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 
@@ -175,6 +176,16 @@ async def _adopt_prospect(db, prospect_id):
     """Mark a contact the track now owns, unless its status already says something true."""
     marks = ','.join('?' for _ in ADOPTABLE)
     await db.execute(f"UPDATE prospects SET status='partnership' WHERE id=? AND status IN ({marks})", (prospect_id, *ADOPTABLE))
+
+
+def _assemble(raw, events, assets, emails, prospect):
+    """One account as the API returns it, from its row and the rows that hang off it."""
+    raw = dict(raw)
+    record = json.loads(raw.pop('record_json'))
+    assets = [{k: v for k, v in a.items() if k != 'account_id'} for a in assets]
+    emails = [{k: v for k, v in e.items() if k != 'account_id'} for e in emails]
+    stopped = bool(prospect and prospect.status in {'replied','opted_out','lost','meeting','closed'}) or any(e['kind'] in STOP or e['kind']=='human_reply' for e in events) or record.get('stage','').strip().lower() in {'paused','declined','do not contact'}
+    return {**raw,'record':record,'events':events,'assets':assets,'emails':emails,'email_verification':prospect.email_status if prospect else '', 'contact_status':prospect.status if prospect else '', 'stopped':stopped}
 
 
 class PartnershipStore:
@@ -339,23 +350,53 @@ class PartnershipStore:
             await db.commit()
         return {'created': created, 'preserved': len(records)-created, 'preview': preview}
 
+    _ASSETS = 'SELECT id,version,content_hash,approved,created_at,account_id FROM partnership_assets'
+    _EMAILS = 'SELECT o.id,o.campaign_id,o.subject,o.status,o.sent_at,o.error,o.step,b.asset_id,b.account_id FROM partnership_email_bindings b JOIN outbox o ON o.id=b.outbox_id'
+
     async def account(self, aid):
         rows = await self.query('SELECT * FROM partnership_accounts WHERE id=?', (aid,))
         if not rows:
             raise HTTPException(404, 'Partnership account not found.')
         raw = rows[0]
-        record = json.loads(raw.pop('record_json'))
         events = await self.query('SELECT * FROM partnership_events WHERE account_id=? ORDER BY occurred_at DESC,id DESC', (aid,))
-        assets = await self.query('SELECT id,version,content_hash,approved,created_at FROM partnership_assets WHERE account_id=? ORDER BY version DESC', (aid,))
-        emails = await self.query('SELECT o.id,o.campaign_id,o.subject,o.status,o.sent_at,o.error,o.step,b.asset_id FROM partnership_email_bindings b JOIN outbox o ON o.id=b.outbox_id WHERE b.account_id=? ORDER BY o.created_at DESC', (aid,))
+        assets = await self.query(self._ASSETS+' WHERE account_id=? ORDER BY version DESC', (aid,))
+        emails = await self.query(self._EMAILS+' WHERE b.account_id=? ORDER BY o.created_at DESC', (aid,))
         prospect = await self.state.get_prospect(raw['prospect_id']) if raw['prospect_id'] else None
-        stopped = bool(prospect and prospect.status in {'replied','opted_out','lost','meeting','closed'}) or any(e['kind'] in STOP or e['kind']=='human_reply' for e in events) or record.get('stage','').strip().lower() in {'paused','declined','do not contact'}
-        return {**raw,'record':record,'events':events,'assets':assets,'emails':emails,'email_verification':prospect.email_status if prospect else '', 'contact_status':prospect.status if prospect else '', 'stopped':stopped}
+        return _assemble(raw, events, assets, emails, prospect)
+
+    async def accounts(self):
+        """Every account in import order, the same shape as account(), in five queries
+        rather than five per account (the list and the bulk-draft poll read them all)."""
+        rows = await self.query('SELECT * FROM partnership_accounts ORDER BY external_id')
+        def by_account(items):
+            grouped = {}
+            for item in items:
+                grouped.setdefault(item['account_id'], []).append(item)
+            return grouped
+        events = by_account(await self.query('SELECT * FROM partnership_events ORDER BY occurred_at DESC,id DESC'))
+        assets = by_account(await self.query(self._ASSETS+' ORDER BY version DESC'))
+        emails = by_account(await self.query(self._EMAILS+' ORDER BY o.created_at DESC'))
+        prospects = {p['id']: SimpleNamespace(**p) for p in await self.query(
+            'SELECT id,status,email_status FROM prospects WHERE id IN '
+            '(SELECT prospect_id FROM partnership_accounts WHERE prospect_id IS NOT NULL)')}
+        return [_assemble(raw, events.get(raw['id'], []), assets.get(raw['id'], []), emails.get(raw['id'], []),
+                          prospects.get(raw['prospect_id'])) for raw in rows]
 
     async def set_email_review(self, aid, review):
         """Save the LLM review of the current draft. Not an editable field: only the server writes it."""
+        await self._set_server_field(aid, 'email_review', review)
+
+    async def set_observation_origin(self, aid, origin):
+        """'research' when pdf_observation was read from the company's pages by the bulk
+        step and nobody has checked it yet; '' once the operator has. Server-written only,
+        and cleared whenever the observation's text is edited (see update)."""
+        await self._set_server_field(aid, 'observation_origin', origin)
+
+    async def _set_server_field(self, aid, key, value):
         account = await self.account(aid)
-        record = {**account['record'],'email_review':review}
+        record = {**account['record'],key:value}
+        if not value:
+            record.pop(key,None)
         async with self.state._connect() as db:
             await db.execute('UPDATE partnership_accounts SET record_json=?,updated_at=? WHERE id=?',(json.dumps(record),now(),aid))
             await db.commit()
@@ -389,6 +430,8 @@ class PartnershipStore:
         record = {**account['record'],**clean}
         if any(record.get(k)!=account['record'].get(k) for k in ('email_subject','email_body')):
             record.pop('email_review',None)     # the LLM review described the old wording
+        if record.get('pdf_observation')!=account['record'].get('pdf_observation'):
+            record.pop('observation_origin',None)   # the operator wrote or edited it: it is theirs now
         if record.get('direct_email') and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',record['direct_email']):
             raise ValueError('Enter a valid direct business email.')
         pid = account['prospect_id']
@@ -639,6 +682,174 @@ async def email_attachment(state,item):
     return {'filename':'partnership-brief.pdf','content_type':'application/pdf','data':row['pdf']}
 
 
+async def draft_account_email(s,aid:str,brain=None,config=None):
+    """Write, humanize and review one partnership intro email and save it on the account.
+    Raises HTTPException when the account isn't ready or the writer gave nothing."""
+    from sellbird.brain import Brain
+    from sellbird.config import load_config
+    from sellbird.untrusted import fence, UNTRUSTED_RULE
+    from sellbird.humanize import humanize
+    a=await s.account(aid);brand=await s.setting('brand',{})
+    r=a['record']
+    if not r.get('pdf_observation') or not r.get('partnership_angle') or not brand.get('name'):
+        raise HTTPException(422,'Save a sourced observation, partnership angle and brand settings first.')
+    config=config or load_config();brain=brain or Brain(s.state,config.brain)
+    prompt=('Write one plain-text agency partnership introduction, 80–125 words. Use a specific observation, a concrete component offer, relevant proof, and one short-call question. The agency retains the client and pricing. Use a personal greeting and signature. Do not invent projects, capacity, numbers, clients or skills gaps. Avoid hype, flattery, em dashes, attachments claims and unprovided links. Return ONLY JSON with subject and body. '+UNTRUSTED_RULE+'\n'+fence(json.dumps({'recipient':r.get('target_person'),'company':r['company'],'observation':r['pdf_observation'],'component':r['partnership_angle'],'brand':brand}), 'reviewed partnership facts'))
+    if r.get('observation_origin')=='research':
+        prompt+=('\nThe observation was found by automated research on their website and nobody has checked it yet: '
+                 'use it as written, state it no more strongly than it reads, and add nothing to it.')
+    result=await brain.think_json(prompt,session_id='sellbird-partnership-writer',agent='writer',task='personal_email')
+    if not isinstance(result,dict) or not isinstance(result.get('subject'),str) or not isinstance(result.get('body'),str):
+        raise HTTPException(502,'The configured writer could not produce a draft. You can edit it manually.')
+    refined=(await humanize(brain,[{'subject':result['subject'][:120],'body':result['body'][:4000]}],agent='writer',enabled=True))[0]
+    review=None
+    if getattr(config.writer,'review',False):
+        from sellbird.draft_review import review_draft
+        observed=('found by automated research on their website, NOT checked by the sender; treat it as a lead, '
+                  'flag any wording that states it more strongly than the source does'
+                  if r.get('observation_origin')=='research' else 'sourced and entered by the sender')
+        facts=[f"- Recipient: {r.get('target_person','')} ({r.get('target_role','')})",f"- Company: {r['company']}",
+               f"- Observation ({observed}): {r['pdf_observation']}",
+               f"- Component the sender could own: {r['partnership_angle']}",
+               f"- Sender details: {json.dumps(brand)}"]
+        refined,verdict,notes=await review_draft(brain,refined,facts,rules=PARTNERSHIP_REVIEW_RULES,rounds=config.writer.review_rounds)
+        review={'verdict':verdict,'fixed':notes['fixed'],'issues':notes['issues']}
+    saved=await s.update(aid,{'email_subject':refined['subject'],'email_body':refined['body']})
+    if review:
+        saved=await s.set_email_review(aid,review) or await s.account(aid)
+    return saved
+
+
+def draftable_for_bulk(account:dict)->str:
+    """'' when the bulk step can make this account ready to queue, else why not.
+    Queuing needs a named person's direct email (a general inbox is never used as a
+    named contact), so an account needs a decision maker and a site to find it on."""
+    r=account['record']
+    if account.get('stopped'):
+        return 'stopped'
+    if r.get('email_body') and r.get('direct_email'):
+        return 'already drafted'
+    if not r.get('partnership_angle'):
+        return 'no partnership angle'
+    if not _person_name(r.get('target_person','')):
+        return 'no named decision maker'
+    if not (r.get('direct_email') or _domain_of(r)):
+        return 'no website to find an email on'
+    return ''
+
+
+def _person_name(value:str)->tuple[str,str]|None:
+    """(first, last) from 'Dipali (Pai) Mahesh'-style names; None without both."""
+    words=[w.strip('.') for w in re.sub(r'\([^)]*\)','',str(value or '')).replace(',',' ').split() if any(c.isalpha() for c in w)]
+    return (words[0],words[-1]) if len(words)>=2 else None
+
+
+def _domain_of(record:dict)->str:
+    try:
+        return normalized_domain(record.get('website',''))
+    except (ValueError,AttributeError):
+        return ''
+
+
+SENDABLE_STATUSES=('verified','risky')
+
+
+async def find_direct_email(s,account:dict,env=None,finder=None)->str:
+    """Look up and verify the decision maker's own address at the company's domain and save it
+    on the account. Returns the address, or '' when nothing deliverable was found (nothing is
+    saved then: a pattern guess is never stored as someone's direct email)."""
+    from sellbird.config import load_env
+    if finder is None:
+        from sellbird.integrations.email_finder import find_email as finder
+    r=account['record'];name=_person_name(r.get('target_person',''));domain=_domain_of(r)
+    if not name or not domain:
+        return ''
+    result=await finder(name[0],name[1],domain,verify=True,env=env or load_env(),state=s.state)
+    if not result.email or result.status not in SENDABLE_STATUSES:
+        return ''
+    if await s.state.get_prospect_by_email(result.email.lower()):
+        return ''                       # someone already has it: resolve it by hand in Contacts
+    saved=await s.update(account['id'],{'direct_email':result.email})
+    if saved.get('prospect_id'):
+        await s.state.update_prospect_email(saved['prospect_id'],result.email,result.status)
+    return result.email
+
+
+async def research_observation(s,brain,config,account:dict):
+    """A sourced observation for the account, read from the company's own pages and saved as
+    pdf_observation. None when nothing specific and checkable was found (nothing is saved)."""
+    from sellbird.research import research_company
+    r=account['record']
+    company=await s.state.get_company(account['company_id']) if account.get('company_id') else None
+    if company is None:
+        return None
+    if not company.website and r.get('website'):
+        company.website=r['website']
+    offer=getattr(getattr(config.product,'offer',None),'primary','') or ''
+    brief=await research_company(brain,s.state,company,offer=offer)
+    if not brief or not brief.get('usable') or not brief.get('hooks'):
+        return None
+    source=(brief.get('sources') or [''])[0]
+    observation=brief['hooks'][0]+(f' (from {source})' if source else '')
+    await s.update(account['id'],{'pdf_observation':observation[:1000]})
+    await s.set_observation_origin(account['id'],'research')
+    return observation
+
+
+_BULK_TASKS=set()
+BULK_DRAFT={'running':False,'total':0,'done':0,'drafted':0,'emails_found':0,'skipped':[],'failed':[],'current':''}
+
+
+async def bulk_draft(s,brain=None,config=None,env=None,finder=None,claimed=False):
+    """Make every eligible partnership account ready to queue, one at a time:
+    1. find and verify the decision maker's direct email (no model call), else skip;
+    2. research a sourced observation from the company's own pages, else skip
+       (never an invented one);
+    3. draft, humanize and review the email.
+    Steps an account already has are not redone. Nothing is queued or sent.
+    ``claimed``: the caller already set BULK_DRAFT['running'] (with no await in between
+    checking and setting it, so two starts can't both get through)."""
+    from sellbird.brain import Brain
+    from sellbird.config import load_config
+    if BULK_DRAFT['running'] and not claimed:
+        raise ValueError('A bulk draft is already running.')
+    BULK_DRAFT.update(running=True,total=0,done=0,drafted=0,emails_found=0,skipped=[],failed=[],current='')
+    try:
+        if not (await s.setting('brand',{})).get('name'):
+            raise ValueError('Save your brand settings (company name) first.')
+        config=config or load_config();brain=brain or Brain(s.state,config.brain)
+        todo=[a for a in await s.accounts() if not draftable_for_bulk(a)]
+        BULK_DRAFT['total']=len(todo)
+        for a in todo:
+            name=a['record'].get('company','')
+            BULK_DRAFT['current']=name
+            try:
+                if not a['record'].get('direct_email'):
+                    if not await find_direct_email(s,a,env,finder):
+                        BULK_DRAFT['skipped'].append({'company':name,'why':'no deliverable direct email found for the decision maker'})
+                        continue
+                    BULK_DRAFT['emails_found']+=1
+                    a=await s.account(a['id'])
+                if a['record'].get('email_body'):
+                    continue
+                if not a['record'].get('pdf_observation'):
+                    if not await research_observation(s,brain,config,a):
+                        BULK_DRAFT['skipped'].append({'company':name,'why':'nothing specific and checkable found on their site'})
+                        continue
+                await draft_account_email(s,a['id'],brain,config)
+                BULK_DRAFT['drafted']+=1
+            except HTTPException as exc:
+                BULK_DRAFT['failed'].append({'company':name,'why':str(exc.detail)})
+            except Exception as exc:
+                logger.warning(f'bulk draft: {name}: {exc}')
+                BULK_DRAFT['failed'].append({'company':name,'why':'unexpected error, see the log'})
+            finally:
+                BULK_DRAFT['done']+=1
+    finally:
+        BULK_DRAFT.update(running=False,current='')
+    return dict(BULK_DRAFT)
+
+
 def build_router(get_state):
     router = APIRouter(prefix='/api/partnerships')
 
@@ -650,8 +861,7 @@ def build_router(get_state):
     @router.get('')
     async def listing():
         s = await store()
-        ids = await s.query('SELECT id FROM partnership_accounts ORDER BY external_id')
-        accounts = [await s.account(r['id']) for r in ids]
+        accounts = await s.accounts()
         pilot = await s.setting('pilot',default_pilot())
         if pilot['status']=='active' and today()>date.fromisoformat(pilot['end_date']):
             pilot={**pilot,'status':'expired'}
@@ -749,12 +959,35 @@ def build_router(get_state):
         except ValueError as exc:
             raise HTTPException(422,str(exc))
 
+    @router.get('/draft-all')
+    async def draft_all_status():
+        s=await store()
+        eligible=sum(not draftable_for_bulk(a) for a in await s.accounts())
+        return {**BULK_DRAFT,'eligible':eligible}
+
+    @router.post('/draft-all')
+    async def draft_all():
+        import asyncio
+        if BULK_DRAFT['running']:
+            raise HTTPException(409,'A bulk draft is already running.')
+        BULK_DRAFT['running']=True          # claimed before any await: a second click gets the 409
+        try:
+            s=await store()
+            if not (await s.setting('brand',{})).get('name'):
+                raise HTTPException(422,'Save your brand settings (company name) first.')
+        except BaseException:
+            BULK_DRAFT['running']=False
+            raise
+        task=asyncio.ensure_future(bulk_draft(s,claimed=True))
+        _BULK_TASKS.add(task);task.add_done_callback(_BULK_TASKS.discard)
+        await asyncio.sleep(0)
+        return {'started':True}
+
     @router.get('/export.csv')
     async def export():
-        s=await store();ids=await s.query('SELECT id FROM partnership_accounts ORDER BY external_id')
+        s=await store()
         data=[]
-        for r in ids:
-            a=await s.account(r['id'])
+        for a in await s.accounts():
             data.append({**a['record'],'harvey_id':a['id'],'company_id':a['company_id'],'prospect_id':a['prospect_id'],'email_verification':a['email_verification'],'stopped':a['stopped'],'recorded_events':json.dumps(a['events'])})
         fields=list(dict.fromkeys(k for r in data for k in r)) or ['id','company']
         out=io.StringIO();w=csv.DictWriter(out,fieldnames=fields);w.writeheader()
@@ -774,6 +1007,13 @@ def build_router(get_state):
             return await (await store()).update(aid,await request.json())
         except (ValueError,TypeError) as exc:
             raise HTTPException(422,str(exc))
+
+    @router.post('/{aid}/observation-checked')
+    async def observation_checked(aid:str):
+        """The operator checked the researched observation against the company's site."""
+        s=await store()
+        await s.set_observation_origin(aid,'')
+        return await s.account(aid)
 
     @router.post('/{aid}/events')
     async def event(aid:str,request:Request):
@@ -802,33 +1042,7 @@ def build_router(get_state):
 
     @router.post('/{aid}/draft')
     async def draft(aid:str):
-        from sellbird.brain import Brain
-        from sellbird.config import load_config
-        from sellbird.untrusted import fence, UNTRUSTED_RULE
-        from sellbird.humanize import humanize
-        s=await store();a=await s.account(aid);brand=await s.setting('brand',{})
-        r=a['record']
-        if not r.get('pdf_observation') or not r.get('partnership_angle') or not brand.get('name'):
-            raise HTTPException(422,'Save a sourced observation, partnership angle and brand settings first.')
-        config=load_config();brain=Brain(s.state,config.brain)
-        prompt=('Write one plain-text agency partnership introduction, 80–125 words. Use a specific observation, a concrete component offer, relevant proof, and one short-call question. The agency retains the client and pricing. Use a personal greeting and signature. Do not invent projects, capacity, numbers, clients or skills gaps. Avoid hype, flattery, em dashes, attachments claims and unprovided links. Return ONLY JSON with subject and body. '+UNTRUSTED_RULE+'\n'+fence(json.dumps({'recipient':r.get('target_person'),'company':r['company'],'observation':r['pdf_observation'],'component':r['partnership_angle'],'brand':brand}), 'reviewed partnership facts'))
-        result=await brain.think_json(prompt,session_id='sellbird-partnership-writer',agent='writer',task='personal_email')
-        if not isinstance(result,dict) or not isinstance(result.get('subject'),str) or not isinstance(result.get('body'),str):
-            raise HTTPException(502,'The configured writer could not produce a draft. You can edit it manually.')
-        refined=(await humanize(brain,[{'subject':result['subject'][:120],'body':result['body'][:4000]}],agent='writer',enabled=True))[0]
-        review=None
-        if getattr(config.writer,'review',False):
-            from sellbird.draft_review import review_draft
-            facts=[f"- Recipient: {r.get('target_person','')} ({r.get('target_role','')})",f"- Company: {r['company']}",
-                   f"- Observation (sourced and entered by the sender): {r['pdf_observation']}",
-                   f"- Component the sender could own: {r['partnership_angle']}",
-                   f"- Sender details: {json.dumps(brand)}"]
-            refined,verdict,notes=await review_draft(brain,refined,facts,rules=PARTNERSHIP_REVIEW_RULES,rounds=config.writer.review_rounds)
-            review={'verdict':verdict,'fixed':notes['fixed'],'issues':notes['issues']}
-        saved=await s.update(aid,{'email_subject':refined['subject'],'email_body':refined['body']})
-        if review:
-            saved=await s.set_email_review(aid,review) or await s.account(aid)
-        return saved
+        return await draft_account_email(await store(),aid)
 
     @router.post('/{aid}/video-script')
     async def video_script(aid:str):

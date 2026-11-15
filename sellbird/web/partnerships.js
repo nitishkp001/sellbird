@@ -24,8 +24,9 @@ async function loadPartnerships(force = false) {
     '<details class="partner-panel"><summary>Brand and proof for briefs</summary>'+partnerBrandForm(data.brand)+'</details>' +
     '<details class="partner-panel"><summary>Add an agency</summary><div class="partner-form"><label>Company name<input class="form-input" id="partner-new-company"></label><label>Company website<input class="form-input" id="partner-new-website" placeholder="https://"></label><label>City / delivery location<input class="form-input" id="partner-new-city"></label><label>Region<input class="form-input" id="partner-new-region" placeholder="India"></label></div><button class="btn btn-secondary" onclick="createPartner()">Create account</button></details>' +
     '<details class="partner-panel"><summary>Import agency research</summary><p>Preview a CSV or JSON account list before importing. Existing account edits and history are preserved. Import does not enroll contacts or send messages.</p><input type="file" accept=".csv,.json" onchange="previewPartnerImport(this)"><div id="partner-import-preview"></div></details>' +
-    '<div class="partner-toolbar"><input id="partner-search" class="form-input" placeholder="Search company, person or research" oninput="renderPartnerRows()"><select id="partner-region" class="form-input" onchange="renderPartnerRows()"><option value="">All regions</option><option>Mohali</option><option>India</option><option>International</option></select><select id="partner-filter" class="form-input" onchange="renderPartnerRows()"><option value="">All accounts</option><option value="draft">Email draft</option><option value="missing">Missing direct email</option><option value="history">Earlier LinkedIn activity</option><option value="requested">Request recorded</option><option value="accepted">Accepted</option><option value="replied">Replied / stopped</option><option value="due">Follow-up due</option></select><button class="btn btn-secondary" onclick="downloadCsv(\'/api/partnerships/export.csv\',\'partnerships.csv\',this)">Export CSV</button></div><div id="partner-rows"></div>';
+    '<div class="partner-toolbar"><input id="partner-search" class="form-input" placeholder="Search company, person or research" oninput="renderPartnerRows()"><select id="partner-region" class="form-input" onchange="renderPartnerRows()"><option value="">All regions</option><option>Mohali</option><option>India</option><option>International</option></select><select id="partner-filter" class="form-input" onchange="renderPartnerRows()"><option value="">All accounts</option><option value="draft">Email draft</option><option value="missing">Missing direct email</option><option value="history">Earlier LinkedIn activity</option><option value="requested">Request recorded</option><option value="accepted">Accepted</option><option value="replied">Replied / stopped</option><option value="due">Follow-up due</option></select><button class="btn btn-secondary" onclick="downloadCsv(\'/api/partnerships/export.csv\',\'partnerships.csv\',this)">Export CSV</button><button class="btn btn-primary" id="partner-draft-all" onclick="draftAllPartners(this)">Research and draft all</button><span class="muted" id="partner-draft-status"></span></div><div id="partner-rows"></div>';
   renderPartnerRows();
+  pollPartnerDraft();
 }
 
 function partnerBrandForm(b) {
@@ -71,7 +72,7 @@ function renderPartnerRows(){
   });
   document.getElementById('partner-rows').innerHTML='<p class="muted">'+rows.length+' accounts. Public email publication and deliverability verification are separate.</p><div class="table-card"><table><thead><tr><th>Company</th><th>Decision maker</th><th>Contact</th><th>Stage / next action</th><th></th></tr></thead><tbody>'+rows.map(a=>{
     const r=a.record;
-    return '<tr><td><b>'+escHtml(r.company)+'</b><br><small>'+escHtml(r.city||r.region)+' · '+escHtml(r.id)+'</small></td><td>'+escHtml(r.target_person||'To identify')+'<br><small>'+escHtml(r.target_role)+'</small></td><td>'+escHtml(r.direct_email||'Direct email pending')+'<br><small>'+escHtml(a.email_verification||'Not verified')+'</small></td><td>'+escHtml(a.stopped?'Replied / stopped':r.stage)+'<br><small>'+escHtml(r.next_action)+'</small></td><td><button class="btn btn-secondary btn-sm" onclick="openPartner('+jsq(a.id)+')">Open account</button></td></tr>';
+    return '<tr><td><b>'+escHtml(r.company)+'</b><br><small>'+escHtml(r.city||r.region)+' · '+escHtml(r.id)+'</small></td><td>'+escHtml(r.target_person||'To identify')+'<br><small>'+escHtml(r.target_role)+'</small></td><td>'+escHtml(r.direct_email||'Direct email pending')+'<br><small>'+escHtml(a.email_verification||'Not verified')+'</small></td><td>'+escHtml(a.stopped?'Replied / stopped':r.stage)+'<br><small>'+escHtml(r.next_action)+'</small>'+(r.email_body?'<br><span class="badge">Email draft ready'+((r.email_review&&r.email_review.verdict)?' · review: '+escHtml(r.email_review.verdict):'')+(r.observation_origin==='research'?' · observation not checked':'')+'</span>':'')+'</td><td>'+(r.email_body?'<button class="btn btn-primary btn-sm" onclick="openPartner('+jsq(a.id)+',\'partner-email-panel\')">Review draft</button> ':'')+'<button class="btn btn-secondary btn-sm" onclick="openPartner('+jsq(a.id)+')">Open account</button></td></tr>';
   }).join('')+'</tbody></table></div>';
 }
 
@@ -96,7 +97,7 @@ function partnerField(key,label,value,wide=false,textarea=false){
   return '<label class="'+(wide?'partner-wide':'')+'">'+label+(textarea?'<textarea':'<input')+' class="form-input" data-partner-field="'+key+'" '+(textarea?'rows="4">'+escHtml(value||'')+'</textarea>':'value="'+escHtml(value||'')+'">')+'</label>';
 }
 
-async function openPartner(id){
+async function openPartner(id,scrollTo){
   const a=await partnerApi('/api/partnerships/'+encodeURIComponent(id));if(!a){showToast('Could not load this account.');return;}
   partnerAccount=a;const r=a.record;
   const profile=safeHref(r.target_profile), site=safeHref(r.website), loom=safeHref(r.loom_url);
@@ -108,10 +109,11 @@ async function openPartner(id){
     '<div class="partner-form">'+f('company','Company')+f('city','City / delivery location')+f('region','Region')+f('size_claimed','Published size / stage')+f('target_person','Decision maker')+f('target_role','Role')+f('target_profile','LinkedIn profile')+f('direct_email','Direct business email')+f('business_inbox','Company inbox (separate)')+f('contact_route','Contact evidence URL')+f('research_date','Research date (YYYY-MM-DD)')+f('stage','Working stage')+f('next_action','Next action',true)+f('followup_date','Follow-up date (YYYY-MM-DD)')+f('loom_url','Actual Loom/video URL')+f('research_notes','Research notes',true,true)+f('research_sources','Research source URLs (separate with |)',true,true)+f('partnership_angle','Relevant component / partnership angle',true,true)+'</div>'+
     '<p class="muted">Linked contact email verification: '+escHtml(a.email_verification||'not verified')+'. Updating the address resets verification. General inboxes are not used as a named contact.</p><div class="partner-toolbar"><button class="btn btn-primary" onclick="savePartner()">Save account</button><button class="btn btn-secondary" onclick="verifyPartnerEmail(this)">Check with configured email verifier</button><small>May use your verifier credits. Inconclusive checks stay unverified.</small></div>'+
     '<div class="partner-panel"><h3>LinkedIn connection</h3><p>Open the researched profile, complete the invitation on LinkedIn, then record what happened. Acceptance is recorded separately.</p><div class="partner-toolbar">'+(profile?'<a class="btn btn-secondary" target="_blank" rel="noopener noreferrer" href="'+profile+'">Open profile ↗</a>':'<span>Add the person-specific profile first.</span>')+[['linkedin_requested','Record request sent'],['linkedin_accepted','Record acceptance'],['linkedin_declined','Record decline']].map(([k,l])=>'<button class="btn btn-secondary" onclick="recordPartnerEvent('+jsq(k)+')">'+l+'</button>').join('')+'</div></div>'+
-    '<div class="partner-panel"><h3>Personalized brief</h3><div class="partner-form">'+typeField+f('pdf_observation','What you observed (sourced)',true,true)+f('pdf_proposal','Component we could own',true,true)+f('pdf_pilot','Proposed first engagement',true,true)+'</div><button class="btn btn-secondary" onclick="generatePartnerBrief(this)">Save and generate PDF</button><div class="partner-assets">'+a.assets.map(x=>'<div>Version '+x.version+' · '+(x.approved?'Reviewed':'Awaiting review')+' <button class="btn btn-ghost btn-sm" onclick="partnerAsset('+jsq(a.id)+','+jsq(x.id)+',\'html\')">Preview</button><button class="btn btn-ghost btn-sm" onclick="partnerAsset('+jsq(a.id)+','+jsq(x.id)+',\'pdf\')">Download PDF</button>'+(!x.approved?'<button class="btn btn-secondary btn-sm" onclick="approvePartnerAsset('+jsq(x.id)+')">Approve reviewed version</button>':'')+'</div>').join('')+'</div></div>'+
-    '<div class="partner-panel"><h3>Personal email</h3><div class="partner-form">'+f('email_subject','Subject',true)+f('email_body','Body',true,true)+'</div>'+partnerReview(r)+'<div class="partner-toolbar"><button class="btn btn-secondary" onclick="generatePartnerEmail(this)">Save and draft with Harvey + Humanizer + review</button><select class="form-input" id="partner-attachment"><option value="">Email only</option>'+a.assets.filter(x=>x.approved).map(x=>'<option value="'+escHtml(x.id)+'">Attach reviewed PDF v'+x.version+'</option>').join('')+'</select><button class="btn btn-primary" onclick="queuePartnerEmail(this)">Save and queue in Outbox</button></div><p class="muted">Queued emails wait for your Outbox approval and direct-email verification. No email is sent by these buttons.</p></div>'+
+    '<div class="partner-panel"><h3>Personalized brief</h3>'+partnerObservationNote(r)+'<div class="partner-form">'+typeField+f('pdf_observation','What you observed (sourced)',true,true)+f('pdf_proposal','Component we could own',true,true)+f('pdf_pilot','Proposed first engagement',true,true)+'</div><button class="btn btn-secondary" onclick="generatePartnerBrief(this)">Save and generate PDF</button><div class="partner-assets">'+a.assets.map(x=>'<div>Version '+x.version+' · '+(x.approved?'Reviewed':'Awaiting review')+' <button class="btn btn-ghost btn-sm" onclick="partnerAsset('+jsq(a.id)+','+jsq(x.id)+',\'html\')">Preview</button><button class="btn btn-ghost btn-sm" onclick="partnerAsset('+jsq(a.id)+','+jsq(x.id)+',\'pdf\')">Download PDF</button>'+(!x.approved?'<button class="btn btn-secondary btn-sm" onclick="approvePartnerAsset('+jsq(x.id)+')">Approve reviewed version</button>':'')+'</div>').join('')+'</div></div>'+
+    '<div class="partner-panel" id="partner-email-panel"><h3>Personal email</h3><div class="partner-form">'+f('email_subject','Subject',true)+f('email_body','Body',true,true)+'</div>'+partnerReview(r)+'<div class="partner-toolbar"><button class="btn btn-secondary" onclick="generatePartnerEmail(this)">Save and draft with Harvey + Humanizer + review</button><select class="form-input" id="partner-attachment"><option value="">Email only</option>'+a.assets.filter(x=>x.approved).map(x=>'<option value="'+escHtml(x.id)+'">Attach reviewed PDF v'+x.version+'</option>').join('')+'</select><button class="btn btn-primary" onclick="queuePartnerEmail(this)">Save and queue in Outbox</button></div><p class="muted">Queued emails wait for your Outbox approval and direct-email verification. No email is sent by these buttons.</p></div>'+
     '<div class="partner-panel"><h3>Optional personalized video</h3><button class="btn btn-secondary" onclick="generatePartnerVideo()">Save and prepare recording script</button><div class="partner-form">'+f('video_script','60–90 second recording plan',true,true)+'</div>'+(loom?'<a href="'+loom+'" target="_blank" rel="noopener">Open saved recording ↗</a>':'<p class="muted">Record the walkthrough, then save its actual link above.</p>')+'</div>'+
     '<div class="partner-panel"><h3>Conversation and next steps</h3><div class="partner-toolbar">'+[['human_reply','Record reply'],['positive_reply','Positive partnership reply'],['call_booked','Call booked'],['brief_received','Brief received'],['do_not_contact','Do not contact']].map(([k,l])=>'<button class="btn btn-secondary" onclick="recordPartnerEvent('+jsq(k)+')">'+l+'</button>').join('')+'</div><h4>Email history</h4>'+a.emails.map(e=>'<p>'+escHtml(e.status)+' · '+escHtml(e.subject)+' · '+escHtml(e.sent_at||'not sent')+(e.asset_id?' · PDF attached':'')+(e.error?' · '+escHtml(e.error):'')+'</p>').join('')+'<h4>Recorded activity</h4>'+a.events.map(e=>'<p>'+escHtml(e.occurred_at)+' · '+escHtml(e.kind)+'<br><small>'+escHtml(e.detail)+'</small></p>').join('')+'</div>';
+  if(scrollTo){const t=document.getElementById(scrollTo);if(t)t.scrollIntoView({behavior:'smooth',block:'start'});}
 }
 
 async function savePartner(refresh=true){
@@ -141,6 +143,17 @@ async function queuePartnerEmail(button){
   if(!await savePartner(false)){button.disabled=false;return;}
   const result=await partnerApi('/api/partnerships/'+partnerAccount.id+'/queue-email',{method:'POST',body:JSON.stringify({asset_id:asset})});
   if(result?.outbox_id){showToast('Queued for review in Outbox.');openPartner(partnerAccount.id);}else{button.disabled=false;showToast(failMsg(result,'Could not queue email.'));}
+}
+// An observation the bulk step read from the company's site has not been checked by anyone.
+function partnerObservationNote(r){
+  if(!r||r.observation_origin!=='research')return '';
+  return '<div class="desk-review"><span class="tag t-bad">Not checked yet</span> The observation below was found automatically on their website. Open the source it names and check it says this before you queue the email. Editing it, or confirming it, clears this note.'+
+    '<div class="partner-toolbar"><button class="btn btn-secondary btn-sm" onclick="confirmPartnerObservation(this)">I checked it on their site</button></div></div>';
+}
+async function confirmPartnerObservation(button){
+  button.disabled=true;if(!await savePartner(false)){button.disabled=false;return;}
+  const result=await partnerApi('/api/partnerships/'+partnerAccount.id+'/observation-checked',{method:'POST',body:'{}'});
+  if(result?.id){showToast('Observation marked as checked.');openPartner(result.id);}else{button.disabled=false;showToast(failMsg(result,'Could not save.'));}
 }
 // The reviewing model's verdict on the current draft (cleared when the text is edited).
 function partnerReview(r){
@@ -199,4 +212,41 @@ async function promoteCompany(companyId) {
   const result = await partnerApi('/api/partnerships/promote', {method: 'POST', body: JSON.stringify({company_id: companyId})});
   if (result?.id) { showToast('Moved to Partnerships. Add your research before queuing an email.'); openPartnerTab(result.id); }
   else showToast(failMsg(result, 'Could not move this company.'));
+}
+
+
+// Research and draft every account that has an angle and an email address. One at a time and slow
+// (a model call per step), so it runs on the server and this polls. Nothing is queued or sent.
+let partnerDraftTimer = null, partnerDraftWasRunning = false;
+function renderPartnerDraftStatus(st) {
+  const el = document.getElementById('partner-draft-status'), btn = document.getElementById('partner-draft-all');
+  if (!el || !btn) return;
+  btn.disabled = !!st.running || !st.eligible;
+  if (st.running) {
+    el.textContent = 'Working on ' + (st.done + 1) + ' of ' + st.total + (st.current ? ': ' + st.current : '') + '…';
+  } else if (st.total && st.done >= st.total) {
+    el.textContent = 'Last run: ' + (st.emails_found || 0) + ' direct emails found, ' + st.drafted + ' drafted, ' +
+      st.skipped.length + ' skipped, ' + st.failed.length + ' failed.' + (st.eligible ? ' ' + st.eligible + ' still to try.' : '');
+  } else {
+    el.textContent = st.eligible ? st.eligible + ' account' + (st.eligible === 1 ? '' : 's') + ' to make ready: find the decision maker\'s direct email, then research and draft.' : 'Nothing to do: every account with a named decision maker and an angle is ready or stopped.';
+  }
+}
+async function pollPartnerDraft() {
+  // One polling chain at a time: every call (a page load, a click) replaces the last one.
+  clearTimeout(partnerDraftTimer); partnerDraftTimer = null;
+  const st = await partnerApi('/api/partnerships/draft-all');
+  if (!st) return;
+  renderPartnerDraftStatus(st);
+  if (st.running) { partnerDraftWasRunning = true; partnerDraftTimer = setTimeout(pollPartnerDraft, 4000); }
+  else if (partnerDraftWasRunning) {
+    partnerDraftWasRunning = false;
+    if (!partnerAccount) loadPartnerships(true);   // don't pull someone out of an account they're editing
+  }
+}
+async function draftAllPartners(button) {
+  if (!confirm('Make every account ready to queue?\n\nFor each one this finds and verifies the decision maker\'s direct email (uses verifier credits), then reads the company\'s site and writes a reviewed draft. It can take a few minutes per account. Nothing is queued or sent; you review each draft first.')) return;
+  button.disabled = true;
+  const res = await partnerApi('/api/partnerships/draft-all', {method: 'POST', body: '{}'});
+  if (!res || !res.started) { button.disabled = false; showToast('Couldn\'t start. A bulk draft may already be running.', 'error'); return; }
+  pollPartnerDraft();
 }

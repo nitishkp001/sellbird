@@ -223,7 +223,7 @@ def _render(func, mode, armed=False):
         pytest.skip("node is not installed")
     source = (PROJECT_ROOT / "sellbird" / "web" / "app.js").read_text(encoding="utf-8")
     parts = [re.search(rf"^function {name}\(.*?^}}\n", source, re.S | re.M).group(0)
-             for name in ("escHtml", "sendingModeBanner", "sendingModeCard")]
+             for name in ("escHtml", "sendingModeBanner", "sendLimitBlock", "sendingModeCard")]
     script = ("const icon = () => '';\n" + "\n".join(parts) +
               f"\nlet _modeBusy = false, _autopilotArmed = {json.dumps(armed)};"
               f"\nprocess.stdout.write({func}({json.dumps(mode)}));")
@@ -253,6 +253,9 @@ def test_settings_explains_both_and_asks_for_the_word():
     assert 'id="autopilot-confirm"' in armed and 'id="autopilot-go" disabled' in armed
     auto = _render("sendingModeCard", {**MODE, "mode": "autopilot"})
     assert "Turn off autopilot" in auto and "works at once" in auto
+    assert "Daily send limit" not in card                       # shown only when the server reports it
+    limit = _render("sendingModeCard", {**MODE, "max_daily_sends": 10, "warmup_ramp": False})
+    assert "Daily send limit" in limit and 'value="10"' in limit and "no warmup ramp" in limit
 
 
 # ── review of the switch: no autopilot email after "off" ──

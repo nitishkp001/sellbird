@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import stat
@@ -1366,6 +1367,8 @@ async def get_sending_mode():
         "your_domains": sorted(allowed_link_domains(config)),
         "booking_page": _booking_prefix(config),
         "held": await state.count_held_for_review(),
+        "max_daily_sends": config.channels.email.max_daily_sends,
+        "warmup_ramp": bool(config.channels.email.warmup.start_date),
     }
 
 
@@ -1398,6 +1401,32 @@ async def set_sending_mode(request: Request):
     if mode == "approval":
         out["requeued"] = requeued
     return out
+
+
+@app.post("/api/send-limit")
+async def set_send_limit(request: Request):
+    """Set the most cold emails Sellbird sends in a day ({"limit": 15}). A running
+    Sellbird picks it up at its next check; no restart."""
+    from sellbird.config import ConfigError, set_max_daily_sends
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    limit = body.get("limit") if isinstance(body, dict) else None
+    # ASCII digits only: str.isdigit() also accepts "²", which int() then refuses.
+    if isinstance(limit, str) and re.fullmatch(r"[0-9]{1,6}", limit.strip()):
+        limit = int(limit.strip())
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        return _refuse('expected {"limit": <whole number>}', 400)
+    path = _resolve_config_file()
+    try:
+        set_max_daily_sends(limit, path)
+    except ConfigError as e:
+        return _refuse(str(e), 409)
+    state = _state()
+    await state.init_db()
+    await state.log_action("send_limit", "dashboard", {"limit": limit, "file": path.name})
+    return {"success": True, "limit": limit}
 
 
 @app.post("/api/outbox/approve-all")
